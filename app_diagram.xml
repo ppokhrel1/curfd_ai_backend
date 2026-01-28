@@ -1,0 +1,136 @@
+<mxfile host="app.diagrams.net" modified="2026-01-24T00:00:00.000Z" agent="chatgpt" version="24.7.8">
+  <diagram id="3d-gen-arch" name="3D Generation (Prompt/Image → STL/GLB)">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Inputs -->
+        <mxCell id="in_title" value="User Inputs" style="swimlane;rounded=1;whiteSpace=wrap;html=1;startSize=26;" vertex="1" parent="1">
+          <mxGeometry x="30" y="70" width="260" height="250" as="geometry"/>
+        </mxCell>
+        <mxCell id="in_prompt" value="Prompt (text)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="in_title">
+          <mxGeometry x="20" y="50" width="220" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="in_image" value="Reference Images (optional)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="in_title">
+          <mxGeometry x="20" y="105" width="220" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="in_components" value="Upload Components / Parts (optional)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="in_title">
+          <mxGeometry x="20" y="160" width="220" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- LLM + planning -->
+        <mxCell id="llm" value="LLM / Orchestrator&#xa;- intent + constraints&#xa;- part decomposition&#xa;- file targets (STL/GLB)&#xa;- safety/validation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="120" width="280" height="160" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="schema" value="Normalized Spec (JSON)&#xa;ObjectSpec + ExportSpec" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="660" y="140" width="250" height="120" as="geometry"/>
+        </mxCell>
+
+        <!-- Retrieval (RAG) -->
+        <mxCell id="rag" value="RAG Retrieval&#xa;(similar objects/parts)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="340" y="320" width="280" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="vectordb" value="Vector DB (embeddings)&#xa;- prompts/specs/parts&#xa;- similarity search" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="660" y="315" width="250" height="85" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="metadb" value="Metadata DB&#xa;(relational)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="950" y="315" width="220" height="85" as="geometry"/>
+        </mxCell>
+
+        <!-- Generation -->
+        <mxCell id="gen" value="3D Generator&#xa;(text/image → geometry)&#xa;- assemble from parts OR&#xa;- generate new mesh" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="340" y="430" width="280" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="qc" value="Mesh QA / Fixes&#xa;- watertight / manifold&#xa;- normals / scale&#xa;- polycount / LOD" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="660" y="445" width="250" height="90" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="export" value="Exporter&#xa;- STL&#xa;- GLB (PBR + textures)&#xa;- USDZ (optional)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="950" y="440" width="220" height="95" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="storage" value="Object Storage&#xa;(S3/MinIO)&#xa;stl/glb/textures" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="440" width="250" height="95" as="geometry"/>
+        </mxCell>
+
+        <!-- Ingestion -->
+        <mxCell id="ingest" value="Data Ingestion&#xa;- crawl refs&#xa;- photos/images&#xa;- labeled parts" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="950" y="90" width="220" height="85" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="index" value="Index / Upsert&#xa;embeddings + metadata" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="295" width="250" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" style="endArrow=block;html=1;" edge="1" parent="1" source="in_prompt" target="llm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="endArrow=block;html=1;" edge="1" parent="1" source="in_image" target="llm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="endArrow=block;html=1;" edge="1" parent="1" source="in_components" target="llm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e4" style="endArrow=block;html=1;" edge="1" parent="1" source="llm" target="schema">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e5" value="query" style="endArrow=block;html=1;" edge="1" parent="1" source="schema" target="rag">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e6" style="endArrow=block;html=1;" edge="1" parent="1" source="rag" target="vectordb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e7" value="hit? parts/spec" style="endArrow=block;html=1;" edge="1" parent="1" source="vectordb" target="gen">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e8" value="if no hit → generate" style="dashed=1;endArrow=block;html=1;" edge="1" parent="1" source="rag" target="gen">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e9" style="endArrow=block;html=1;" edge="1" parent="1" source="gen" target="qc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e10" style="endArrow=block;html=1;" edge="1" parent="1" source="qc" target="export">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e11" style="endArrow=block;html=1;" edge="1" parent="1" source="export" target="storage">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e12" value="write metadata" style="endArrow=block;html=1;" edge="1" parent="1" source="export" target="metadb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e13" value="embed + upsert" style="endArrow=block;html=1;" edge="1" parent="1" source="storage" target="index">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e14" style="endArrow=block;html=1;" edge="1" parent="1" source="index" target="vectordb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e15" style="endArrow=block;html=1;" edge="1" parent="1" source="index" target="metadb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e16" value="crawl/photos" style="endArrow=block;html=1;" edge="1" parent="1" source="ingest" target="index">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
