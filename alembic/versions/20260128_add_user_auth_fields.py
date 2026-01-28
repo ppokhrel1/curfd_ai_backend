@@ -24,17 +24,35 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def upgrade() -> None:
-    # Add columns as nullable first to avoid breaking existing rows.
-    with op.batch_alter_table("users") as batch_op:
-        batch_op.add_column(sa.Column("username", sa.String(length=150), nullable=True))
-        batch_op.add_column(sa.Column("hashed_password", sa.String(length=255), nullable=True))
-
-    # Backfill values for existing users.
     conn = op.get_bind()
-    rows = conn.execute(sa.text("SELECT id, email FROM users")).mappings().all()
+    existing_cols = {
+        row["name"]
+        for row in conn.execute(sa.text("PRAGMA table_info(users)")).mappings().all()
+    }
+
+    added_columns = False
+    if "username" not in existing_cols or "hashed_password" not in existing_cols:
+        # Add columns as nullable first to avoid breaking existing rows.
+        with op.batch_alter_table("users") as batch_op:
+            if "username" not in existing_cols:
+                batch_op.add_column(sa.Column("username", sa.String(length=150), nullable=True))
+            if "hashed_password" not in existing_cols:
+                batch_op.add_column(
+                    sa.Column("hashed_password", sa.String(length=255), nullable=True)
+                )
+        added_columns = True
+
+    # Backfill values for existing users when fields are missing.
+    rows = conn.execute(
+        sa.text("SELECT id, email, username, hashed_password FROM users")
+    ).mappings().all()
 
     used_usernames: set[str] = set()
     for row in rows:
+        if row["username"] and row["hashed_password"]:
+            used_usernames.add(row["username"])
+            continue
+
         user_id = row["id"]
         email = row["email"]
         base = None
@@ -54,18 +72,45 @@ def upgrade() -> None:
 
         conn.execute(
             sa.text(
-                "UPDATE users SET username = :username, hashed_password = :hashed_password WHERE id = :id"
+                "UPDATE users SET username = COALESCE(username, :username), "
+                "hashed_password = COALESCE(hashed_password, :hashed_password) "
+                "WHERE id = :id"
             ),
             {"username": candidate, "hashed_password": hashed, "id": user_id},
         )
 
-    # Enforce NOT NULL + unique for username after backfill.
-    with op.batch_alter_table("users") as batch_op:
-        batch_op.alter_column("username", existing_type=sa.String(length=150), nullable=False)
-        batch_op.alter_column(
-            "hashed_password", existing_type=sa.String(length=255), nullable=False
+    # Enforce NOT NULL when safe and unique constraint if missing.
+    nulls = conn.execute(
+        sa.text(
+            "SELECT COUNT(*) AS cnt FROM users "
+            "WHERE username IS NULL OR hashed_password IS NULL"
         )
-        batch_op.create_unique_constraint("uq_users_username", ["username"])
+    ).mappings().first()["cnt"]
+
+    if nulls == 0 and added_columns:
+        with op.batch_alter_table("users") as batch_op:
+            batch_op.alter_column("username", existing_type=sa.String(length=150), nullable=False)
+            batch_op.alter_column(
+                "hashed_password", existing_type=sa.String(length=255), nullable=False
+            )
+
+    # Create unique index if no unique index exists for username.
+    index_rows = conn.execute(sa.text("PRAGMA index_list(users)")).mappings().all()
+    has_unique_username = False
+    for idx in index_rows:
+        if not idx.get("unique"):
+            continue
+        idx_name = idx["name"]
+        cols = conn.execute(
+            sa.text(f"PRAGMA index_info('{idx_name}')")
+        ).mappings().all()
+        if len(cols) == 1 and cols[0].get("name") == "username":
+            has_unique_username = True
+            break
+
+    if not has_unique_username and ("username" in existing_cols or added_columns):
+        with op.batch_alter_table("users") as batch_op:
+            batch_op.create_unique_constraint("uq_users_username", ["username"])
 
 
 def downgrade() -> None:

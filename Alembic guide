@@ -1,0 +1,12 @@
+Check current revision:
+/home/anupadkh/code/webapps/venvs/curfd/bin/alembic current
+If upgrade fails with “already exists”:
+That means the schema already has those tables/columns, but Alembic hasn’t recorded it.
+Fix by stamping to the latest revision:
+/home/anupadkh/code/webapps/venvs/curfd/bin/alembic stamp head
+Then run:
+/home/anupadkh/code/webapps/vengvs/curfd/bin/alembic upgrade head
+Notes on composite relationship
+
+asset_meta now relates to Asset via the join table asset_meta_composites.
+Use is_composite_of (list of asset IDs) in the API; the join table stores those references.

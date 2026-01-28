@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import assets, auth, chats, health, jobs, messages, sessions
+from app.api.routes import asset_meta, assets, auth, chats, health, jobs, messages, sessions
 
 api_router = APIRouter()
 
@@ -11,3 +11,4 @@ api_router.include_router(chats.router, prefix="/chats", tags=["chats"])
 api_router.include_router(messages.router, prefix="/messages", tags=["messages"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(assets.router, prefix="/assets", tags=["assets"])
+api_router.include_router(asset_meta.router, prefix="/asset-meta", tags=["asset-meta"])
