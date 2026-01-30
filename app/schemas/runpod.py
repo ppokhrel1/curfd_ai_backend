@@ -3,10 +3,17 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-class ChatRunpodRequest(BaseModel):
+class RunpodHistoryItem(BaseModel):
+    role: str
     content: str
-    action: Literal["process_requirements", "generate_scad"] = "process_requirements"
+
+
+class ChatRunpodRequest(BaseModel):
+    content: str | None = None
+    action: Literal["process_requirements", "generate_scad", "health"] = "process_requirements"
     requirements_json: dict | None = None
+    history: list[RunpodHistoryItem] | None = None
+    sync: bool = False
     metadata_json: dict | None = None
 
 

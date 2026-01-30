@@ -49,3 +49,4 @@ uvicorn app.main:app --reload
 - Supabase API: set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` if you want to call Supabase APIs
 - Migrations: `alembic` folder ready for `alembic revision` and `alembic upgrade`
 - Runpod: set `RUNPOD_API_TOKEN` (and optionally `RUNPOD_BASE_URL`) in `.env` to enable chat runpod flow
+- Runpod actions: `process_requirements`, `generate_scad`, `health` (history + sync supported via `/chats/{chat_id}/runpod` or the chat socket)

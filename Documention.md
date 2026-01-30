@@ -161,6 +161,34 @@ curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
   -H "Content-Type: application/json" \\
   -d '{"content":"Generate SCAD","action":"generate_scad","requirements_json":{"constraints":{"environment":"outdoor","size":"medium"}}}'
 ```
+```bash
+curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
+  -H "Authorization: Bearer <access_token>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"action":"health","sync":true}'
+```
+
+Socket request payload (send over WS after connecting):
+```json
+{
+  "type": "runpod.request",
+  "payload": {
+    "action": "process_requirements",
+    "content": "Design a small quadcopter frame",
+    "history": [
+      {"role": "user", "content": "I need a lightweight drone"}
+    ]
+  }
+}
+```
+
+Socket events (examples):
+```json
+{"type":"runpod.queued","chat_id":"<chat_id>","runpod_id":"<runpod_id>","message_id":"<message_id>","status":"queued"}
+```
+```json
+{"type":"runpod.completed","chat_id":"<chat_id>","runpod_id":"<runpod_id>","message":{"id":"<message_id>","role":"assistant","content":"<output>"},"output":{"status":"success"}}
+```
 
 ### Jobs
 - `POST /jobs`

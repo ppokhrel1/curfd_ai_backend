@@ -20,16 +20,21 @@ class RunpodClient:
         action: str,
         prompt: str | None,
         requirements_json: dict | None,
+        history: list[dict] | None = None,
+        sync: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"input": {"action": action}}
         if prompt is not None:
             payload["input"]["prompt"] = prompt
         if requirements_json is not None:
             payload["input"]["requirements_json"] = requirements_json
+        if history is not None:
+            payload["input"]["history"] = history
 
+        endpoint = "runsync" if sync else "run"
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{self._base_url}/run",
+                f"{self._base_url}/{endpoint}",
                 json=payload,
                 headers=self._headers(),
             )

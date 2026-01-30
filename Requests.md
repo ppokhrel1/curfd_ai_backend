@@ -95,6 +95,21 @@ Response (example):
 }
 ```
 
+## 6b) Start a Runpod request over the socket
+Send this JSON payload over the open WebSocket connection:
+```json
+{
+  "type": "runpod.request",
+  "payload": {
+    "action": "process_requirements",
+    "content": "Design a small quadcopter frame",
+    "history": [
+      {"role": "user", "content": "I need a lightweight drone"}
+    ]
+  }
+}
+```
+
 ## 7) Listen for the first Runpod response on the socket
 Expected socket events (examples):
 ```json
