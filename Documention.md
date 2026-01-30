@@ -143,6 +143,25 @@ curl -X DELETE http://localhost:8000/api/v1/messages/<message_id> \\
   -H "Authorization: Bearer <access_token>"
 ```
 
+### Chat Socket + Runpod
+- `WS /chat-socket/{chat_id}` (query param `token`)
+```bash
+ws://localhost:8000/api/v1/chat-socket/<chat_id>?token=<access_token>
+```
+- `POST /chats/{chat_id}/runpod`
+```bash
+curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
+  -H "Authorization: Bearer <access_token>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"content":"Make me a table for flying","action":"process_requirements"}'
+```
+```bash
+curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
+  -H "Authorization: Bearer <access_token>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"content":"Generate SCAD","action":"generate_scad","requirements_json":{"constraints":{"environment":"outdoor","size":"medium"}}}'
+```
+
 ### Jobs
 - `POST /jobs`
 ```bash

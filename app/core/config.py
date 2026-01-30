@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     hf_token: str | None = None
     replicate_api_token: str | None = None
 
+    runpod_base_url: str = "https://api.runpod.ai/v2/k91olo35clkkky"
+    runpod_api_token: str | None = None
+    runpod_status_poll_interval_seconds: float = 2.5
+    runpod_status_timeout_seconds: int = 1800
+
 
 settings = Settings()
 
