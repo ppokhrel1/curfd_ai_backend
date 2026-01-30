@@ -16,4 +16,9 @@ class Asset(Base, UUIDMixin, TimestampMixin):
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     job = relationship("Job", back_populates="assets")
-    meta = relationship("AssetMeta", back_populates="asset", cascade="all, delete-orphan")
+    meta = relationship(
+        "AssetMeta",
+        back_populates="asset",
+        cascade="all, delete-orphan",
+        foreign_keys="AssetMeta.asset_id",
+    )
