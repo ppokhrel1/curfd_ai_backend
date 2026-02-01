@@ -30,14 +30,15 @@ def create_chat(
 
 @router.get("", response_model=list[ChatRead])
 def list_chats(
-    session_id: str | None = None,
+    session_id: str,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    query = db.query(ChatModel).join(SessionModel)
-    query = query.filter(SessionModel.user_id == user_id)
-    if session_id:
-        query = query.filter(ChatModel.session_id == session_id)
+    query = (
+        db.query(ChatModel)
+        .join(SessionModel)
+        .filter(SessionModel.user_id == user_id, ChatModel.session_id == session_id)
+    )
     return query.order_by(ChatModel.created_at.desc()).all()
 
 

@@ -96,7 +96,7 @@ curl -X POST http://localhost:8000/api/v1/chats \\
   -H "Content-Type: application/json" \\
   -d '{"session_id":"<session_id>","title":"First chat"}'
 ```
-- `GET /chats` (optional filter: `session_id`)
+- `GET /chats` (requires `session_id`)
 ```bash
 curl "http://localhost:8000/api/v1/chats?session_id=<session_id>" \\
   -H "Authorization: Bearer <access_token>"
