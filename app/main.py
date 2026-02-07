@@ -69,7 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     @app.on_event("startup")
-    def on_startup() -> None:
+    async def on_startup() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
