@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 *.db
 *.env
+venv/
 .env.example
 .venv_ws/

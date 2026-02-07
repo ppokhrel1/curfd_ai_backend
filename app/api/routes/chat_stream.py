@@ -6,7 +6,15 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -50,13 +58,29 @@ def _serialize_asset(asset: AssetModel) -> dict[str, Any]:
 
 
 def _extract_runpod_asset_data(output: Any) -> dict[str, Any] | None:
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"_extract_runpod_asset_data called with output type: {type(output)}")
+    logger.info(f"Output content: {output}")
+
     if not isinstance(output, dict):
+        logger.warning(f"Output is not a dict, it's {type(output)}")
         return None
+
     if isinstance(output.get("data"), dict):
+        logger.info("Found data at output['data']")
         return output["data"]
+
     inner = output.get("output")
     if isinstance(inner, dict) and isinstance(inner.get("data"), dict):
+        logger.info("Found data at output['output']['data']")
         return inner["data"]
+
+    logger.warning(
+        f"Could not extract asset data. Output keys: {output.keys() if isinstance(output, dict) else 'N/A'}"
+    )
     return None
 
 
@@ -71,24 +95,42 @@ def _persist_generate_scad_asset(
     asset_type: str | None,
     storage_provider: str | None,
 ) -> dict[str, Any] | None:
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    logger.info(
+        f"_persist_generate_scad_asset called for chat_id={chat_id}, runpod_id={runpod_id}, job_id={job_id}"
+    )
+
     data = _extract_runpod_asset_data(output)
     if not data:
+        logger.error("Failed to extract asset data from RunPod output")
         return None
+
+    logger.info(f"Extracted data: {data}")
+
     download_url = data.get("download_url")
     if not download_url:
+        logger.error(f"No download_url in extracted data. Data keys: {data.keys()}")
         return None
+
+    logger.info(f"Found download_url: {download_url}")
 
     chat = db.get(ChatModel, chat_id)
     if not chat:
+        logger.error(f"Chat not found: {chat_id}")
         return None
 
     resolved_job = None
     if job_id:
         resolved_job = db.get(JobModel, job_id)
         if not resolved_job:
+            logger.error(f"job_id {job_id} not found in database")
             raise ValueError("job_id not found for generate_scad asset persistence")
 
     if not resolved_job:
+        logger.info("Creating new job for asset")
         prompt = None
         if isinstance(requirements_json, dict):
             prompt = requirements_json.get("primary_function") or requirements_json.get(
@@ -106,7 +148,9 @@ def _persist_generate_scad_asset(
         db.add(resolved_job)
         db.commit()
         db.refresh(resolved_job)
+        logger.info(f"Created job with id: {resolved_job.id}")
 
+    logger.info(f"Creating asset for job_id: {resolved_job.id}")
     asset = AssetModel(
         job_id=resolved_job.id,
         asset_type=asset_type or "scad_zip",
@@ -123,6 +167,7 @@ def _persist_generate_scad_asset(
     db.add(asset)
     db.commit()
     db.refresh(asset)
+    logger.info(f"Created asset with id: {asset.id}")
 
     meta = AssetMetaModel(
         asset_id=asset.id,
@@ -131,6 +176,7 @@ def _persist_generate_scad_asset(
     )
     db.add(meta)
     db.commit()
+    logger.info(f"Created asset_meta for asset_id: {asset.id}")
 
     return _serialize_asset(asset)
 
@@ -142,9 +188,13 @@ async def _handle_runpod_request(
     db: Session,
 ) -> ChatRunpodResponse:
     if payload.action == "generate_scad" and not payload.requirements_json:
-        raise HTTPException(status_code=422, detail="requirements_json is required for generate_scad")
+        raise HTTPException(
+            status_code=422, detail="requirements_json is required for generate_scad"
+        )
     if payload.action == "process_requirements" and not payload.content:
-        raise HTTPException(status_code=422, detail="content is required for process_requirements")
+        raise HTTPException(
+            status_code=422, detail="content is required for process_requirements"
+        )
 
     metadata_json = payload.metadata_json or {}
     metadata_json["runpod_action"] = payload.action
@@ -170,26 +220,50 @@ async def _handle_runpod_request(
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(f"Sending RunPod request: action={payload.action}, chat_id={chat_id}")
+    logger.info(f"Requirements JSON present: {payload.requirements_json is not None}")
+    if payload.requirements_json:
+        logger.info(f"Requirements keys: {list(payload.requirements_json.keys())}")
+    logger.info(f"Metadata: {payload.metadata_json}")
+
     try:
         runpod_response = await client.start_job(
             action=payload.action,
-            prompt=payload.content if payload.action == "process_requirements" else None,
-            requirements_json=payload.requirements_json if payload.action == "generate_scad" else None,
+            prompt=(
+                payload.content if payload.action == "process_requirements" else None
+            ),
+            requirements_json=(
+                payload.requirements_json if payload.action == "generate_scad" else None
+            ),
             history=_normalize_history(
-                [item.model_dump() for item in payload.history] if payload.history else None
+                [item.model_dump() for item in payload.history]
+                if payload.history
+                else None
             ),
             sync=payload.sync,
         )
+        logger.info(f"RunPod accepted job: {runpod_response.get('id')}")
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Runpod request failed: {exc}") from exc
+        logger.exception(f"RunPod request failed: {exc}")
+        raise HTTPException(
+            status_code=502, detail=f"Runpod request failed: {exc}"
+        ) from exc
+
+    request_context = {
+        "job_id": (payload.metadata_json or {}).get("job_id"),
+        "storage_provider": (payload.metadata_json or {}).get("storage_provider"),
+    }
 
     asset_context = None
     if payload.action == "generate_scad":
         asset_context = {
             "requirements_json": payload.requirements_json,
-            "job_id": (payload.metadata_json or {}).get("job_id"),
+            "job_id": request_context["job_id"],
             "asset_type": (payload.metadata_json or {}).get("asset_type"),
-            "storage_provider": (payload.metadata_json or {}).get("storage_provider"),
+            "storage_provider": request_context["storage_provider"],
         }
 
     if payload.sync:
@@ -201,17 +275,26 @@ async def _handle_runpod_request(
                     chat_id=chat_id,
                     output=output,
                     runpod_id=None,
-                    requirements_json=asset_context["requirements_json"] if asset_context else None,
+                    requirements_json=(
+                        asset_context["requirements_json"] if asset_context else None
+                    ),
                     job_id=asset_context["job_id"] if asset_context else None,
                     asset_type=asset_context["asset_type"] if asset_context else None,
-                    storage_provider=asset_context["storage_provider"] if asset_context else None,
+                    storage_provider=(
+                        asset_context["storage_provider"] if asset_context else None
+                    ),
                 )
             except Exception as exc:
-                asset_output = {"error": f"asset persistence failed: {exc}", "output": output}
+                asset_output = {
+                    "error": f"asset persistence failed: {exc}",
+                    "output": output,
+                }
             if asset_output is not None:
                 output = asset_output
         assistant_content = (
-            output if isinstance(output, str) else json.dumps(output or {}, ensure_ascii=True)
+            output
+            if isinstance(output, str)
+            else json.dumps(output or {}, ensure_ascii=True)
         )
         assistant_message = MessageModel(
             chat_id=chat_id,
@@ -233,7 +316,9 @@ async def _handle_runpod_request(
             },
         )
         message_id = user_message.id if user_message else assistant_message.id
-        return ChatRunpodResponse(status="completed", runpod_id=None, message_id=message_id)
+        return ChatRunpodResponse(
+            status="completed", runpod_id=None, message_id=message_id
+        )
 
     runpod_id = runpod_response.get("id")
     if not runpod_id:
@@ -245,11 +330,14 @@ async def _handle_runpod_request(
             runpod_id=runpod_id,
             action=payload.action,
             asset_context=asset_context,
+            request_context=request_context,
         )
     )
 
     message_id = user_message.id if user_message else runpod_id
-    return ChatRunpodResponse(status="queued", runpod_id=runpod_id, message_id=message_id)
+    return ChatRunpodResponse(
+        status="queued", runpod_id=runpod_id, message_id=message_id
+    )
 
 
 async def _runpod_poll_and_emit(
@@ -258,6 +346,7 @@ async def _runpod_poll_and_emit(
     runpod_id: str,
     action: str,
     asset_context: dict[str, Any] | None = None,
+    request_context: dict[str, Any] | None = None,
 ) -> None:
     try:
         client = get_runpod_client()
@@ -273,9 +362,21 @@ async def _runpod_poll_and_emit(
         )
         return
 
+    job_id = None
+    if request_context:
+        job_id = request_context.get("job_id")
+    elif asset_context:
+        job_id = asset_context.get("job_id")
+
     await chat_socket_manager.send_to_chat(
         chat_id,
-        {"type": "runpod.started", "chat_id": chat_id, "runpod_id": runpod_id, "action": action},
+        {
+            "type": "runpod.started",
+            "chat_id": chat_id,
+            "runpod_id": runpod_id,
+            "job_id": job_id,
+            "action": action,
+        },
     )
     last_status = None
     deadline = time.monotonic() + settings.runpod_status_timeout_seconds
@@ -309,22 +410,34 @@ async def _runpod_poll_and_emit(
         status_value = status_payload.get("status")
 
         if status_value and status_value != last_status:
-            await chat_socket_manager.send_to_chat(
-                chat_id,
-                {
-                    "type": "runpod.status",
-                    "chat_id": chat_id,
-                    "runpod_id": runpod_id,
-                    "status": status_value,
-                },
-            )
+            status_update = {
+                "type": "runpod.status",
+                "chat_id": chat_id,
+                "runpod_id": runpod_id,
+                "job_id": job_id,
+                "status": status_value,
+                "assets_ready": status_value == "COMPLETED",
+                "action": action,
+            }
+            if status_value == "COMPLETED":
+                status_update["output"] = status_payload.get("output")
+
+            await chat_socket_manager.send_to_chat(chat_id, status_update)
             last_status = status_value
 
         if status_value == "COMPLETED":
+            import logging
+
+            logger = logging.getLogger(__name__)
+
             output = status_payload.get("output")
+            logger.info(f"RunPod COMPLETED for runpod_id={runpod_id}, action={action}")
+            logger.info(f"Status payload: {status_payload}")
+
             db = SessionLocal()
             try:
                 if action == "generate_scad":
+                    logger.info("Attempting to persist generate_scad asset")
                     try:
                         asset_output = _persist_generate_scad_asset(
                             db=db,
@@ -332,43 +445,90 @@ async def _runpod_poll_and_emit(
                             output=output,
                             runpod_id=runpod_id,
                             requirements_json=(
-                                asset_context.get("requirements_json") if asset_context else None
+                                asset_context.get("requirements_json")
+                                if asset_context
+                                else None
                             ),
-                            job_id=asset_context.get("job_id") if asset_context else None,
-                            asset_type=asset_context.get("asset_type") if asset_context else None,
+                            job_id=(
+                                asset_context.get("job_id") if asset_context else None
+                            ),
+                            asset_type=(
+                                asset_context.get("asset_type")
+                                if asset_context
+                                else None
+                            ),
                             storage_provider=(
-                                asset_context.get("storage_provider") if asset_context else None
+                                asset_context.get("storage_provider")
+                                if asset_context
+                                else None
                             ),
                         )
+                        if asset_output is None:
+                            logger.error(
+                                "_persist_generate_scad_asset returned None - asset not saved!"
+                            )
+                        else:
+                            logger.info(f"Asset persisted successfully: {asset_output}")
                     except Exception as exc:
+                        logger.exception(
+                            f"Exception in _persist_generate_scad_asset: {exc}"
+                        )
                         asset_output = {
                             "error": f"asset persistence failed: {exc}",
                             "output": output,
                         }
                     if asset_output is not None:
                         output = asset_output
+                else:
+                    logger.info(f"Action is '{action}', not persisting asset")
+
+                # Convert output to JSON-safe format (handle datetime objects)
+                def make_json_safe(obj):
+                    """Convert datetime objects to ISO format strings"""
+                    if isinstance(obj, dict):
+                        return {k: make_json_safe(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [make_json_safe(item) for item in obj]
+                    elif isinstance(obj, datetime):
+                        return obj.isoformat()
+                    else:
+                        return obj
+
+                json_safe_output = make_json_safe(output) if output else status_payload
+
                 assistant_content = (
-                    output
-                    if isinstance(output, str)
-                    else json.dumps(output or status_payload, ensure_ascii=True)
+                    json_safe_output
+                    if isinstance(json_safe_output, str)
+                    else json.dumps(json_safe_output, ensure_ascii=True)
                 )
                 assistant_message = MessageModel(
                     chat_id=chat_id,
                     role="assistant",
                     content=assistant_content,
-                    metadata_json={"runpod_id": runpod_id, "status": status_value, "output": output},
+                    metadata_json={
+                        "runpod_id": runpod_id,
+                        "status": status_value,
+                        "output": json_safe_output,
+                    },
                 )
                 db.add(assistant_message)
                 db.commit()
                 db.refresh(assistant_message)
+                internal_job_id = None
+                if isinstance(json_safe_output, dict):
+                    internal_job_id = json_safe_output.get("job_id")
+
+                final_job_id = job_id or internal_job_id
+
                 await chat_socket_manager.send_to_chat(
                     chat_id,
                     {
                         "type": "runpod.completed",
                         "chat_id": chat_id,
                         "runpod_id": runpod_id,
+                        "job_id": final_job_id,
                         "message": _serialize_message(assistant_message),
-                        "output": output,
+                        "output": json_safe_output,
                     },
                 )
             finally:
@@ -376,6 +536,25 @@ async def _runpod_poll_and_emit(
             return
 
         if status_value in {"FAILED", "CANCELLED", "TIMED_OUT", "ERROR"}:
+            import logging
+
+            logger = logging.getLogger(__name__)
+
+            logger.error(f" RunPod job FAILED: {runpod_id}")
+            logger.error(f"Status: {status_value}")
+            logger.error(f"Full status payload: {json.dumps(status_payload, indent=2)}")
+
+            # Extract error details from various possible locations
+            error_detail = (
+                status_payload.get("error")
+                or status_payload.get("output", {}).get("error")
+                if isinstance(status_payload.get("output"), dict)
+                else None
+                or status_payload.get("message")
+                or f"RunPod job failed with status: {status_value}"
+            )
+            logger.error(f"Error detail: {error_detail}")
+
             db = SessionLocal()
             try:
                 assistant_content = json.dumps(status_payload, ensure_ascii=True)
@@ -383,7 +562,11 @@ async def _runpod_poll_and_emit(
                     chat_id=chat_id,
                     role="assistant",
                     content=assistant_content,
-                    metadata_json={"runpod_id": runpod_id, "status": status_value, "error": status_payload},
+                    metadata_json={
+                        "runpod_id": runpod_id,
+                        "status": status_value,
+                        "error": status_payload,
+                    },
                 )
                 db.add(assistant_message)
                 db.commit()

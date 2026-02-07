@@ -38,14 +38,41 @@ def create_asset(
 @router.get("", response_model=list[AssetRead])
 def list_assets(
     job_id: str | None = None,
+    runpod_id: str | None = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    import logging
+    from sqlalchemy import or_
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        f"list_assets called: job_id={job_id}, runpod_id={runpod_id}, user_id={user_id}"
+    )
+
     query = db.query(AssetModel).join(JobModel).join(SessionModel)
     query = query.filter(SessionModel.user_id == user_id)
+
+    filters = []
+
     if job_id:
-        query = query.filter(AssetModel.job_id == job_id)
-    return query.order_by(AssetModel.created_at.desc()).all()
+        filters.append(AssetModel.job_id == job_id)
+        logger.info(f"Added job_id filter: {job_id}")
+
+    if runpod_id:
+        filters.append(AssetModel.metadata_json.op("->>")("runpod_id") == runpod_id)
+        logger.info(f"Added runpod_id filter: {runpod_id}")
+
+    if filters:
+        if len(filters) == 1:
+            query = query.filter(filters[0])
+        else:
+            query = query.filter(or_(*filters))
+
+    results = query.order_by(AssetModel.created_at.desc()).all()
+    logger.info(f"list_assets returning {len(results)} assets")
+
+    return results
 
 
 @router.get("/{asset_id}", response_model=AssetRead)
