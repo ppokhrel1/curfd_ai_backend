@@ -11,7 +11,7 @@ from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.revoked_token import RevokedToken
 import app.models  # noqa: F401
-
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 def create_app() -> FastAPI:
     configure_logging(settings.log_level)
@@ -70,7 +70,8 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def on_startup() -> None:
-        Base.metadata.create_all(bind=engine)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     return app
 
