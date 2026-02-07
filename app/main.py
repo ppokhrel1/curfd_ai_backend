@@ -12,6 +12,7 @@ from app.db.session import SessionLocal, engine
 from app.models.revoked_token import RevokedToken
 import app.models  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import select
 
 def create_app() -> FastAPI:
     configure_logging(settings.log_level)
@@ -41,15 +42,15 @@ def create_app() -> FastAPI:
                     now_ts = datetime.now(timezone.utc).timestamp()
                     seconds_left = exp - now_ts
                     if 0 < seconds_left <= 600:
-                        db = SessionLocal()
-                        try:
-                            revoked = (
-                                db.query(RevokedToken)
-                                .filter(RevokedToken.token_hash == token_hash(token))
-                                .first()
-                            )
-                        finally:
-                            db.close()
+                        async with SessionLocal() as db:
+                            try:
+                                stmt = select(RevokedToken).where(
+                                    RevokedToken.token_hash == token_hash(token)
+                                )
+                                result = await db.execute(stmt)
+                                revoked = result.scalars().first()
+                            finally:
+                                await db.close()
                         if not revoked:
                             new_exp = datetime.fromtimestamp(exp, tz=timezone.utc) + timedelta(
                                 minutes=10
