@@ -10,6 +10,7 @@ from app.schemas.session import SessionCreate, SessionRead, SessionUpdate
 router = APIRouter()
 
 
+@router.post("/", response_model=SessionRead, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 @router.post("", response_model=SessionRead, status_code=status.HTTP_201_CREATED)
 async def create_session(
     payload: SessionCreate,
@@ -31,6 +32,7 @@ async def create_session(
     return session
 
 
+@router.get("/", response_model=list[SessionRead], include_in_schema=False)
 @router.get("", response_model=list[SessionRead])
 async def list_sessions(
     db: AsyncSession = Depends(get_db),
@@ -44,6 +46,7 @@ async def list_sessions(
     return result.scalars().all()
 
 
+@router.get("/{session_id}/", response_model=SessionRead, include_in_schema=False)
 @router.get("/{session_id}", response_model=SessionRead)
 async def get_session(
     session_id: str,
@@ -58,6 +61,7 @@ async def get_session(
     return session
 
 
+@router.patch("/{session_id}/", response_model=SessionRead, include_in_schema=False)
 @router.patch("/{session_id}", response_model=SessionRead)
 async def update_session(
     session_id: str,
@@ -85,6 +89,7 @@ async def update_session(
     return session
 
 
+@router.delete("/{session_id}/", status_code=status.HTTP_204_NO_CONTENT, include_in_schema=False)
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_id: str,

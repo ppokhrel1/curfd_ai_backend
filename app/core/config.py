@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
 
     cors_allow_origins: str = "http://localhost:3000,http://localhost:5173,https://nooriat.com,https://nooriat.org,https://www.nooriat.com,https://www.nooriat.org"
+    trusted_hosts: str = "localhost,127.0.0.1,[::1],clownfish-app-ipxaa.ondigitalocean.app,*.ondigitalocean.app"
 
     secret_key: str | None = None
     algorithm: str = "HS256"

@@ -21,10 +21,11 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
 
     app = FastAPI(title=settings.project_name, redirect_slashes=False)
-    
+
+    allowed_hosts = [host.strip() for host in settings.trusted_hosts.split(",") if host.strip()]
     app.add_middleware(
-    TrustedHostMiddleware, 
-    allowed_hosts=["clownfish-app-ipxaa.ondigitalocean.app", "*.ondigitalocean.app"]
+        TrustedHostMiddleware,
+        allowed_hosts=allowed_hosts,
     )
     # Trust proxy headers (X-Forwarded-Proto, etc.) to ensure redirects use HTTPS
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
