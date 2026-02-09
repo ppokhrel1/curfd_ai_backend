@@ -21,6 +21,7 @@ def create_app() -> FastAPI:
 
     # robustly parse origins
     origins = [origin.strip() for origin in settings.cors_allow_origins.split(",") if origin.strip()]
+    print(f"DEBUG: Loaded CORS Origins: {origins}")
     
     app.add_middleware(
         CORSMiddleware,
@@ -29,6 +30,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def log_request_origin(request, call_next):
+        origin = request.headers.get("origin")
+        if origin:
+            print(f"DEBUG: Incoming request from Origin: {origin}")
+        return await call_next(request)
 
     @app.middleware("http")
     async def refresh_access_token(request, call_next):
