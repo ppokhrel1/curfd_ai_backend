@@ -48,6 +48,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
+
     @app.middleware("http")
     async def log_request_origin(request, call_next):
         origin = request.headers.get("origin")
