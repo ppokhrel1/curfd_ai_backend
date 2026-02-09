@@ -33,6 +33,25 @@ async def _validate_and_claim_session_owner(
     return session
 
 
+async def _get_chat_and_verify_access(
+    *,
+    db: AsyncSession,
+    chat_id: str,
+    user_id: str,
+) -> ChatModel:
+    chat = await db.get(ChatModel, chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(ChatModel, ChatModel.session_id == SessionModel.id)
+        .where(ChatModel.id == chat_id)
+    )
+    if owner and owner != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return chat
+
+
 @router.post("", response_model=ChatRead, status_code=status.HTTP_201_CREATED)
 async def create_chat(
     payload: ChatCreate,
@@ -72,17 +91,7 @@ async def get_chat(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    chat = await db.get(ChatModel, chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .where(ChatModel.id == chat_id)
-    )
-    if owner and owner != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return chat
+    return await _get_chat_and_verify_access(db=db, chat_id=chat_id, user_id=user_id)
 
 
 @router.patch("/{chat_id}", response_model=ChatRead)
@@ -92,16 +101,7 @@ async def update_chat(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    chat = await db.get(ChatModel, chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .where(ChatModel.id == chat_id)
-    )
-    if owner and owner != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    chat = await _get_chat_and_verify_access(db=db, chat_id=chat_id, user_id=user_id)
     if payload.title is not None:
         chat.title = payload.title
     await db.commit()
@@ -115,16 +115,7 @@ async def delete_chat(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    chat = await db.get(ChatModel, chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .where(ChatModel.id == chat_id)
-    )
-    if owner and owner != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    chat = await _get_chat_and_verify_access(db=db, chat_id=chat_id, user_id=user_id)
     await db.delete(chat)
     await db.commit()
     return None

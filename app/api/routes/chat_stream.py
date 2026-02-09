@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict
 
 from fastapi import (
     APIRouter,
@@ -34,6 +34,19 @@ from app.services.chat_socket import chat_socket_manager
 from app.services.runpod import get_runpod_client
 
 router = APIRouter()
+
+
+class RequestContext(TypedDict, total=False):
+    job_id: str | None
+    storage_provider: str | None
+    status_timeout_seconds: Any
+
+
+class AssetContext(TypedDict, total=False):
+    requirements_json: dict[str, Any] | None
+    job_id: str | None
+    asset_type: str | None
+    storage_provider: str | None
 
 
 def _serialize_message(message: MessageModel) -> dict[str, Any]:
@@ -298,21 +311,24 @@ async def _handle_runpod_request(
             status_code=502, detail=f"Runpod request failed: {exc}"
         ) from exc
 
-    request_context = {
-        "job_id": (payload.metadata_json or {}).get("job_id"),
-        "storage_provider": (payload.metadata_json or {}).get("storage_provider"),
-        "status_timeout_seconds": (payload.metadata_json or {}).get(
-            "status_timeout_seconds"
-        ),
+    meta = payload.metadata_json or {}
+    job_id_val = meta.get("job_id")
+    storage_provider_val = meta.get("storage_provider")
+    
+    request_context: RequestContext = {
+        "job_id": str(job_id_val) if job_id_val is not None else None,
+        "storage_provider": str(storage_provider_val) if storage_provider_val is not None else None,
+        "status_timeout_seconds": meta.get("status_timeout_seconds"),
     }
 
-    asset_context = None
+    asset_context: AssetContext | None = None
     if resolved_action == "generate_scad":
+        asset_type_val = meta.get("asset_type")
         asset_context = {
             "requirements_json": payload.requirements_json,
-            "job_id": request_context["job_id"],
-            "asset_type": (payload.metadata_json or {}).get("asset_type"),
-            "storage_provider": request_context["storage_provider"],
+            "job_id": request_context.get("job_id"),
+            "asset_type": str(asset_type_val) if asset_type_val is not None else None,
+            "storage_provider": request_context.get("storage_provider"),
         }
 
     if payload.sync:
@@ -399,8 +415,8 @@ async def _runpod_poll_and_emit(
     chat_id: str,
     runpod_id: str,
     action: str,
-    asset_context: dict[str, Any] | None = None,
-    request_context: dict[str, Any] | None = None,
+    asset_context: AssetContext | None = None,
+    request_context: RequestContext | None = None,
     status_timeout_seconds: int | float | str | None = None,
 ) -> None:
     try:

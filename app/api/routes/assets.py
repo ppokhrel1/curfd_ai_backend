@@ -1,5 +1,6 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
@@ -8,6 +9,8 @@ from app.models.asset import Asset as AssetModel
 from app.models.job import Job as JobModel
 from app.models.session import Session as SessionModel
 from app.schemas.asset import AssetCreate, AssetRead
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -48,10 +51,6 @@ async def list_assets(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    import logging
-    from sqlalchemy import or_
-
-    logger = logging.getLogger(__name__)
     logger.info(
         f"list_assets called: job_id={job_id}, runpod_id={runpod_id}, user_id={user_id}"
     )
