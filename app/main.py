@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -13,11 +14,20 @@ from app.models.revoked_token import RevokedToken
 import app.models  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy import select
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 def create_app() -> FastAPI:
     configure_logging(settings.log_level)
 
-    app = FastAPI(title=settings.project_name)
+    app = FastAPI(title=settings.project_name, redirect_slashes=False)
+    
+    app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=["clownfish-app-ipxaa.ondigitalocean.app", "*.ondigitalocean.app"]
+    )
+    # Trust proxy headers (X-Forwarded-Proto, etc.) to ensure redirects use HTTPS
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
 
     # robustly parse origins
     raw_origins = [origin.strip() for origin in settings.cors_allow_origins.split(",") if origin.strip()]
