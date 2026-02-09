@@ -7,3 +7,4 @@ venv/
 .env.example
 .venv_ws/
 hello.txt
+.gemini
