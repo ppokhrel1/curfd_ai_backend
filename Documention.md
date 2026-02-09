@@ -176,13 +176,50 @@ ws://localhost:8000/api/v1/chat-socket/<chat_id>?token=<access_token>
 curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
   -H "Authorization: Bearer <access_token>" \\
   -H "Content-Type: application/json" \\
-  -d '{"content":"Make me a table for flying","action":"process_requirements"}'
+  -d '{
+    "action":"process_requirements",
+    "content":"Design a small quadcopter frame",
+    "history":[
+      {"role":"user","content":"I need a lightweight drone"}
+    ]
+  }'
 ```
 ```bash
 curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
   -H "Authorization: Bearer <access_token>" \\
   -H "Content-Type: application/json" \\
-  -d '{"content":"Generate SCAD","action":"generate_scad","requirements_json":{"constraints":{"environment":"outdoor","size":"medium"}}}'
+  -d '{
+    "action":"generate_scad",
+    "content":"Generate SCAD",
+    "requirements_json":{
+      "model_type":"drone",
+      "primary_function":"A small quadcopter frame for hobby use",
+      "description_natural_language":"A compact central body with four arms equally spaced...",
+      "standard_components":[
+        {"name":"Flight controller","search_term":"stack 20x20 mm"}
+      ],
+      "custom_description":"Use 3 mm thick arms, 160 mm motor-to-motor..."
+    }
+  }'
+```
+```bash
+# Backward-compatible alias: process_scad is normalized to generate_scad
+curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
+  -H "Authorization: Bearer <access_token>" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "action":"process_scad",
+    "content":"Generate SCAD",
+    "requirements_json":{
+      "model_type":"drone",
+      "primary_function":"A small quadcopter frame for hobby use",
+      "description_natural_language":"A compact central body with four arms equally spaced...",
+      "standard_components":[
+        {"name":"Flight controller","search_term":"stack 20x20 mm"}
+      ],
+      "custom_description":"Use 3 mm thick arms, 160 mm motor-to-motor..."
+    }
+  }'
 ```
 ```bash
 curl -X POST http://localhost:8000/api/v1/chats/<chat_id>/runpod \\
@@ -204,6 +241,14 @@ Socket request payload (send over WS after connecting):
   }
 }
 ```
+
+Runpod action notes:
+- Supported actions: `process_requirements`, `generate_scad`, `process_scad` (alias), `health`
+- For `process_requirements`, backend request field `content` is forwarded to RunPod as `input.prompt`.
+- `process_scad` is accepted for compatibility and mapped internally to `generate_scad`.
+- If `history` is omitted, backend automatically loads chat history from stored `messages` for that `chat_id`.
+- `health` does not send history to RunPod.
+- You can override polling timeout per request with `metadata_json.status_timeout_seconds` (default server timeout is 7200s).
 
 Socket events (examples):
 ```json

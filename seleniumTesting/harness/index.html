@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CURFD Selenium Harness</title>
+  <style>
+    body { font-family: monospace; margin: 20px; }
+    .row { margin: 10px 0; }
+    label { display: inline-block; width: 160px; }
+    input { width: 420px; }
+    button { margin-left: 164px; }
+    pre { background: #f5f5f5; padding: 10px; border-radius: 6px; overflow: auto; max-height: 260px; }
+  </style>
+</head>
+<body>
+  <h1>CURFD Selenium Harness</h1>
+
+  <div class="row">
+    <label for="api-base-url">API Base URL</label>
+    <input id="api-base-url" value="http://localhost:8000/api/v1" />
+  </div>
+  <div class="row">
+    <label for="email">Email</label>
+    <input id="email" />
+  </div>
+  <div class="row">
+    <label for="password">Password</label>
+    <input id="password" type="password" />
+  </div>
+  <div class="row">
+    <button id="login-btn" onclick="login()">Login</button>
+  </div>
+  <div class="row">
+    <label>Login status</label><span id="login-status"></span>
+  </div>
+  <pre id="login-response"></pre>
+
+  <hr />
+
+  <div class="row">
+    <label for="session-name">Session name</label>
+    <input id="session-name" value="Selenium Session" />
+  </div>
+  <div class="row">
+    <button id="create-session-btn" onclick="createSession()">Create Session</button>
+  </div>
+  <div class="row">
+    <label>Session status</label><span id="session-status"></span>
+  </div>
+  <pre id="session-response"></pre>
+
+  <hr />
+
+  <div class="row">
+    <label for="session-id">Session id</label>
+    <input id="session-id" />
+  </div>
+  <div class="row">
+    <label for="chat-title">Chat title</label>
+    <input id="chat-title" value="Selenium Chat" />
+  </div>
+  <div class="row">
+    <button id="create-chat-btn" onclick="createChat()">Create Chat</button>
+  </div>
+  <div class="row">
+    <label>Chat create status</label><span id="create-chat-status"></span>
+  </div>
+  <pre id="create-chat-response"></pre>
+
+  <div class="row">
+    <button id="list-chats-btn" onclick="listChats()">List Chats</button>
+  </div>
+  <div class="row">
+    <label>List status</label><span id="list-chats-status"></span>
+  </div>
+  <pre id="list-chats-response"></pre>
+
+  <script>
+    let accessToken = null;
+
+    function baseUrl() {
+      return document.getElementById("api-base-url").value.replace(/\/+$/, "");
+    }
+
+    function authHeaders() {
+      const headers = { "Content-Type": "application/json" };
+      if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+      return headers;
+    }
+
+    async function parseJsonSafe(resp) {
+      try {
+        return await resp.json();
+      } catch {
+        return { detail: "Non-JSON response" };
+      }
+    }
+
+    async function login() {
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+      const resp = await fetch(`${baseUrl()}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await parseJsonSafe(resp);
+      if (resp.ok && data.access_token) accessToken = data.access_token;
+      document.getElementById("login-status").innerText = `${resp.status}`;
+      document.getElementById("login-response").innerText = JSON.stringify(data, null, 2);
+    }
+
+    async function createSession() {
+      const name = document.getElementById("session-name").value;
+      const resp = await fetch(`${baseUrl()}/sessions`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ name, status: "active" })
+      });
+      const data = await parseJsonSafe(resp);
+      if (resp.ok && data.id) document.getElementById("session-id").value = data.id;
+      document.getElementById("session-status").innerText = `${resp.status}`;
+      document.getElementById("session-response").innerText = JSON.stringify(data, null, 2);
+    }
+
+    async function createChat() {
+      const sessionId = document.getElementById("session-id").value;
+      const title = document.getElementById("chat-title").value;
+      const resp = await fetch(`${baseUrl()}/chats`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ session_id: sessionId, title })
+      });
+      const data = await parseJsonSafe(resp);
+      document.getElementById("create-chat-status").innerText = `${resp.status}`;
+      document.getElementById("create-chat-response").innerText = JSON.stringify(data, null, 2);
+    }
+
+    async function listChats() {
+      const sessionId = document.getElementById("session-id").value;
+      const resp = await fetch(`${baseUrl()}/chats?session_id=${encodeURIComponent(sessionId)}`, {
+        method: "GET",
+        headers: authHeaders()
+      });
+      const data = await parseJsonSafe(resp);
+      document.getElementById("list-chats-status").innerText = `${resp.status}`;
+      document.getElementById("list-chats-response").innerText = JSON.stringify(data, null, 2);
+    }
+  </script>
+</body>
+</html>

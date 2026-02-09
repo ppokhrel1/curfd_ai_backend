@@ -26,6 +26,7 @@ from app.models.asset_meta import AssetMeta as AssetMetaModel
 from app.models.chat import Chat as ChatModel
 from app.models.job import Job as JobModel
 from app.models.message import Message as MessageModel
+from app.models.session import Session as SessionModel
 from app.schemas.asset import AssetRead
 from app.schemas.message import MessageRead
 from app.schemas.runpod import ChatRunpodRequest, ChatRunpodResponse
@@ -37,6 +38,12 @@ router = APIRouter()
 
 def _serialize_message(message: MessageModel) -> dict[str, Any]:
     return MessageRead.model_validate(message).model_dump()
+
+
+def _normalize_action(action: str) -> str:
+    if action == "process_scad":
+        return "generate_scad"
+    return action
 
 
 def _normalize_history(history: list[dict] | None) -> list[dict] | None:
@@ -52,8 +59,35 @@ def _normalize_history(history: list[dict] | None) -> list[dict] | None:
     return normalized
 
 
+async def _load_chat_history(db: AsyncSession, chat_id: str) -> list[dict]:
+    result = await db.execute(
+        select(MessageModel.role, MessageModel.content)
+        .where(MessageModel.chat_id == chat_id)
+        .order_by(MessageModel.created_at.asc())
+    )
+    rows = result.all()
+    history: list[dict] = []
+    for role, content in rows:
+        if role is None or content is None:
+            continue
+        history.append({"role": role, "content": content})
+    return history
+
+
 def _serialize_asset(asset: AssetModel) -> dict[str, Any]:
     return AssetRead.model_validate(asset).model_dump()
+
+
+async def _load_serialized_messages(
+    db: AsyncSession, chat_id: str
+) -> list[dict[str, Any]]:
+    result = await db.execute(
+        select(MessageModel)
+        .where(MessageModel.chat_id == chat_id)
+        .order_by(MessageModel.created_at.asc())
+    )
+    messages = result.scalars().all()
+    return [_serialize_message(message) for message in messages]
 
 
 def _extract_runpod_asset_data(output: Any) -> dict[str, Any] | None:
@@ -168,13 +202,17 @@ async def _persist_generate_scad_asset(
     await db.refresh(asset)
     logger.info(f"Created asset with id: {asset.id}")
 
+    uploaded_by = await db.scalar(
+        select(SessionModel.user_id).where(SessionModel.id == chat.session_id)
+    )
     meta = AssetMetaModel(
         asset_id=asset.id,
         part_name=data.get("filename"),
-        uploaded_by=chat.session.user_id if chat.session else None,
+        uploaded_by=uploaded_by,
     )
     db.add(meta)
     await db.commit()
+    await db.refresh(asset)
     logger.info(f"Created asset_meta for asset_id: {asset.id}")
 
     return _serialize_asset(asset)
@@ -186,17 +224,22 @@ async def _handle_runpod_request(
     payload: ChatRunpodRequest,
     db: AsyncSession,
 ) -> ChatRunpodResponse:
-    if payload.action == "generate_scad" and not payload.requirements_json:
+    requested_action = payload.action
+    resolved_action = _normalize_action(requested_action)
+
+    if resolved_action == "generate_scad" and not payload.requirements_json:
         raise HTTPException(
             status_code=422, detail="requirements_json is required for generate_scad"
         )
-    if payload.action == "process_requirements" and not payload.content:
+    if resolved_action == "process_requirements" and not payload.content:
         raise HTTPException(
             status_code=422, detail="content is required for process_requirements"
         )
 
     metadata_json = payload.metadata_json or {}
-    metadata_json["runpod_action"] = payload.action
+    metadata_json["runpod_action"] = resolved_action
+    if requested_action != resolved_action:
+        metadata_json["runpod_action_requested"] = requested_action
     if payload.requirements_json is not None:
         metadata_json["requirements_json"] = payload.requirements_json
     if payload.history is not None:
@@ -222,26 +265,30 @@ async def _handle_runpod_request(
     import logging
 
     logger = logging.getLogger(__name__)
-    logger.info(f"Sending RunPod request: action={payload.action}, chat_id={chat_id}")
+    logger.info(
+        f"Sending RunPod request: action={resolved_action}, requested_action={requested_action}, chat_id={chat_id}"
+    )
     logger.info(f"Requirements JSON present: {payload.requirements_json is not None}")
     if payload.requirements_json:
         logger.info(f"Requirements keys: {list(payload.requirements_json.keys())}")
     logger.info(f"Metadata: {payload.metadata_json}")
 
+    runpod_history = _normalize_history(
+        [item.model_dump() for item in payload.history] if payload.history else None
+    )
+    if runpod_history is None:
+        runpod_history = await _load_chat_history(db, chat_id)
+
     try:
         runpod_response = await client.start_job(
-            action=payload.action,
+            action=resolved_action,
             prompt=(
-                payload.content if payload.action == "process_requirements" else None
+                payload.content if resolved_action == "process_requirements" else None
             ),
             requirements_json=(
-                payload.requirements_json if payload.action == "generate_scad" else None
+                payload.requirements_json if resolved_action == "generate_scad" else None
             ),
-            history=_normalize_history(
-                [item.model_dump() for item in payload.history]
-                if payload.history
-                else None
-            ),
+            history=runpod_history if resolved_action != "health" else None,
             sync=payload.sync,
         )
         logger.info(f"RunPod accepted job: {runpod_response.get('id')}")
@@ -254,10 +301,13 @@ async def _handle_runpod_request(
     request_context = {
         "job_id": (payload.metadata_json or {}).get("job_id"),
         "storage_provider": (payload.metadata_json or {}).get("storage_provider"),
+        "status_timeout_seconds": (payload.metadata_json or {}).get(
+            "status_timeout_seconds"
+        ),
     }
 
     asset_context = None
-    if payload.action == "generate_scad":
+    if resolved_action == "generate_scad":
         asset_context = {
             "requirements_json": payload.requirements_json,
             "job_id": request_context["job_id"],
@@ -267,7 +317,7 @@ async def _handle_runpod_request(
 
     if payload.sync:
         output = runpod_response
-        if payload.action == "generate_scad":
+        if resolved_action == "generate_scad":
             try:
                 asset_output = await _persist_generate_scad_asset(
                     db=db,
@@ -299,7 +349,11 @@ async def _handle_runpod_request(
             chat_id=chat_id,
             role="assistant",
             content=assistant_content,
-            metadata_json={"runpod_action": payload.action, "output": output},
+            metadata_json={
+                "runpod_action": resolved_action,
+                "runpod_action_requested": requested_action,
+                "output": output,
+            },
         )
         db.add(assistant_message)
         await db.commit()
@@ -327,9 +381,10 @@ async def _handle_runpod_request(
         _runpod_poll_and_emit(
             chat_id=chat_id,
             runpod_id=runpod_id,
-            action=payload.action,
+            action=resolved_action,
             asset_context=asset_context,
             request_context=request_context,
+            status_timeout_seconds=request_context["status_timeout_seconds"],
         )
     )
 
@@ -346,6 +401,7 @@ async def _runpod_poll_and_emit(
     action: str,
     asset_context: dict[str, Any] | None = None,
     request_context: dict[str, Any] | None = None,
+    status_timeout_seconds: int | float | str | None = None,
 ) -> None:
     try:
         client = get_runpod_client()
@@ -378,7 +434,15 @@ async def _runpod_poll_and_emit(
         },
     )
     last_status = None
-    deadline = time.monotonic() + settings.runpod_status_timeout_seconds
+    timeout_seconds = settings.runpod_status_timeout_seconds
+    if status_timeout_seconds is not None:
+        try:
+            parsed_timeout = int(float(status_timeout_seconds))
+            if parsed_timeout > 0:
+                timeout_seconds = parsed_timeout
+        except (TypeError, ValueError):
+            pass
+    deadline = time.monotonic() + timeout_seconds
 
     while True:
         if time.monotonic() > deadline:
@@ -388,6 +452,8 @@ async def _runpod_poll_and_emit(
                     "type": "runpod.timeout",
                     "chat_id": chat_id,
                     "runpod_id": runpod_id,
+                    "timeout_seconds": timeout_seconds,
+                    "last_status": last_status,
                 },
             )
             return
@@ -634,6 +700,15 @@ async def chat_socket(
             return
 
     await chat_socket_manager.connect(chat_id, websocket)
+    async with SessionLocal() as db:
+        messages = await _load_serialized_messages(db, chat_id)
+    await websocket.send_json(
+        {
+            "type": "chat.history",
+            "chat_id": chat_id,
+            "messages": messages,
+        }
+    )
     try:
         while True:
             message = await websocket.receive_text()

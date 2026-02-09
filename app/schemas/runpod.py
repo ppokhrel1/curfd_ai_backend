@@ -10,7 +10,7 @@ class RunpodHistoryItem(BaseModel):
 
 class ChatRunpodRequest(BaseModel):
     content: str | None = None
-    action: Literal["process_requirements", "generate_scad", "health"] = "process_requirements"
+    action: Literal["process_requirements", "generate_scad", "process_scad", "health"] = "process_requirements"
     requirements_json: dict | None = None
     history: list[RunpodHistoryItem] | None = None
     sync: bool = False
