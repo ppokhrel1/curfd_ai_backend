@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
 from app.db.session import get_db
@@ -12,15 +13,20 @@ router = APIRouter()
 
 
 @router.post("", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
-def create_message(
+async def create_message(
     payload: MessageCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    chat = db.get(ChatModel, payload.chat_id)
+    chat = await db.get(ChatModel, payload.chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    if chat.session and chat.session.user_id and chat.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(ChatModel, ChatModel.session_id == SessionModel.id)
+        .where(ChatModel.id == payload.chat_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     message = MessageModel(
         chat_id=payload.chat_id,
@@ -30,49 +36,67 @@ def create_message(
         metadata_json=payload.metadata_json,
     )
     db.add(message)
-    db.commit()
-    db.refresh(message)
+    await db.commit()
+    await db.refresh(message)
     return message
 
 
 @router.get("", response_model=list[MessageRead])
-def list_messages(
+async def list_messages(
     chat_id: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    query = db.query(MessageModel).join(ChatModel).join(SessionModel)
-    query = query.filter(SessionModel.user_id == user_id)
+    stmt = (
+        select(MessageModel)
+        .join(ChatModel, MessageModel.chat_id == ChatModel.id)
+        .join(SessionModel, ChatModel.session_id == SessionModel.id)
+        .where(SessionModel.user_id == user_id)
+    )
     if chat_id:
-        query = query.filter(MessageModel.chat_id == chat_id)
-    return query.order_by(MessageModel.created_at.asc()).all()
+        stmt = stmt.where(MessageModel.chat_id == chat_id)
+    stmt = stmt.order_by(MessageModel.created_at.asc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
 
 
 @router.get("/{message_id}", response_model=MessageRead)
-def get_message(
+async def get_message(
     message_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    message = db.get(MessageModel, message_id)
+    message = await db.get(MessageModel, message_id)
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    if message.chat and message.chat.session and message.chat.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(ChatModel, ChatModel.session_id == SessionModel.id)
+        .join(MessageModel, MessageModel.chat_id == ChatModel.id)
+        .where(MessageModel.id == message_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     return message
 
 
 @router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_message(
+async def delete_message(
     message_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    message = db.get(MessageModel, message_id)
+    message = await db.get(MessageModel, message_id)
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    if message.chat and message.chat.session and message.chat.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(ChatModel, ChatModel.session_id == SessionModel.id)
+        .join(MessageModel, MessageModel.chat_id == ChatModel.id)
+        .where(MessageModel.id == message_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
-    db.delete(message)
-    db.commit()
+    await db.delete(message)
+    await db.commit()
     return None

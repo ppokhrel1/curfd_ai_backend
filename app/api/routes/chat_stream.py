@@ -15,18 +15,17 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.deps import get_current_user_id
-from app.core.jwt import decode_access_token, token_hash
+from app.core.deps import get_current_user_id, get_supabase_user
 from app.db.session import SessionLocal, get_db
 from app.models.asset import Asset as AssetModel
 from app.models.asset_meta import AssetMeta as AssetMetaModel
 from app.models.chat import Chat as ChatModel
 from app.models.job import Job as JobModel
 from app.models.message import Message as MessageModel
-from app.models.revoked_token import RevokedToken
 from app.schemas.asset import AssetRead
 from app.schemas.message import MessageRead
 from app.schemas.runpod import ChatRunpodRequest, ChatRunpodResponse
@@ -84,9 +83,9 @@ def _extract_runpod_asset_data(output: Any) -> dict[str, Any] | None:
     return None
 
 
-def _persist_generate_scad_asset(
+async def _persist_generate_scad_asset(
     *,
-    db: Session,
+    db: AsyncSession,
     chat_id: str,
     output: Any,
     runpod_id: str | None,
@@ -117,14 +116,14 @@ def _persist_generate_scad_asset(
 
     logger.info(f"Found download_url: {download_url}")
 
-    chat = db.get(ChatModel, chat_id)
+    chat = await db.get(ChatModel, chat_id)
     if not chat:
         logger.error(f"Chat not found: {chat_id}")
         return None
 
     resolved_job = None
     if job_id:
-        resolved_job = db.get(JobModel, job_id)
+        resolved_job = await db.get(JobModel, job_id)
         if not resolved_job:
             logger.error(f"job_id {job_id} not found in database")
             raise ValueError("job_id not found for generate_scad asset persistence")
@@ -146,8 +145,8 @@ def _persist_generate_scad_asset(
             finished_at=datetime.now(timezone.utc),
         )
         db.add(resolved_job)
-        db.commit()
-        db.refresh(resolved_job)
+        await db.commit()
+        await db.refresh(resolved_job)
         logger.info(f"Created job with id: {resolved_job.id}")
 
     logger.info(f"Creating asset for job_id: {resolved_job.id}")
@@ -165,8 +164,8 @@ def _persist_generate_scad_asset(
         },
     )
     db.add(asset)
-    db.commit()
-    db.refresh(asset)
+    await db.commit()
+    await db.refresh(asset)
     logger.info(f"Created asset with id: {asset.id}")
 
     meta = AssetMetaModel(
@@ -175,7 +174,7 @@ def _persist_generate_scad_asset(
         uploaded_by=chat.session.user_id if chat.session else None,
     )
     db.add(meta)
-    db.commit()
+    await db.commit()
     logger.info(f"Created asset_meta for asset_id: {asset.id}")
 
     return _serialize_asset(asset)
@@ -185,7 +184,7 @@ async def _handle_runpod_request(
     *,
     chat_id: str,
     payload: ChatRunpodRequest,
-    db: Session,
+    db: AsyncSession,
 ) -> ChatRunpodResponse:
     if payload.action == "generate_scad" and not payload.requirements_json:
         raise HTTPException(
@@ -212,8 +211,8 @@ async def _handle_runpod_request(
             metadata_json=metadata_json,
         )
         db.add(user_message)
-        db.commit()
-        db.refresh(user_message)
+        await db.commit()
+        await db.refresh(user_message)
 
     try:
         client = get_runpod_client()
@@ -270,7 +269,7 @@ async def _handle_runpod_request(
         output = runpod_response
         if payload.action == "generate_scad":
             try:
-                asset_output = _persist_generate_scad_asset(
+                asset_output = await _persist_generate_scad_asset(
                     db=db,
                     chat_id=chat_id,
                     output=output,
@@ -303,8 +302,8 @@ async def _handle_runpod_request(
             metadata_json={"runpod_action": payload.action, "output": output},
         )
         db.add(assistant_message)
-        db.commit()
-        db.refresh(assistant_message)
+        await db.commit()
+        await db.refresh(assistant_message)
         await chat_socket_manager.send_to_chat(
             chat_id,
             {
@@ -434,12 +433,11 @@ async def _runpod_poll_and_emit(
             logger.info(f"RunPod COMPLETED for runpod_id={runpod_id}, action={action}")
             logger.info(f"Status payload: {status_payload}")
 
-            db = SessionLocal()
-            try:
+            async with SessionLocal() as db:
                 if action == "generate_scad":
                     logger.info("Attempting to persist generate_scad asset")
                     try:
-                        asset_output = _persist_generate_scad_asset(
+                        asset_output = await _persist_generate_scad_asset(
                             db=db,
                             chat_id=chat_id,
                             output=output,
@@ -482,9 +480,7 @@ async def _runpod_poll_and_emit(
                 else:
                     logger.info(f"Action is '{action}', not persisting asset")
 
-                # Convert output to JSON-safe format (handle datetime objects)
                 def make_json_safe(obj):
-                    """Convert datetime objects to ISO format strings"""
                     if isinstance(obj, dict):
                         return {k: make_json_safe(v) for k, v in obj.items()}
                     elif isinstance(obj, list):
@@ -512,8 +508,8 @@ async def _runpod_poll_and_emit(
                     },
                 )
                 db.add(assistant_message)
-                db.commit()
-                db.refresh(assistant_message)
+                await db.commit()
+                await db.refresh(assistant_message)
                 internal_job_id = None
                 if isinstance(json_safe_output, dict):
                     internal_job_id = json_safe_output.get("job_id")
@@ -531,8 +527,6 @@ async def _runpod_poll_and_emit(
                         "output": json_safe_output,
                     },
                 )
-            finally:
-                db.close()
             return
 
         if status_value in {"FAILED", "CANCELLED", "TIMED_OUT", "ERROR"}:
@@ -544,7 +538,6 @@ async def _runpod_poll_and_emit(
             logger.error(f"Status: {status_value}")
             logger.error(f"Full status payload: {json.dumps(status_payload, indent=2)}")
 
-            # Extract error details from various possible locations
             error_detail = (
                 status_payload.get("error")
                 or status_payload.get("output", {}).get("error")
@@ -555,8 +548,7 @@ async def _runpod_poll_and_emit(
             )
             logger.error(f"Error detail: {error_detail}")
 
-            db = SessionLocal()
-            try:
+            async with SessionLocal() as db:
                 assistant_content = json.dumps(status_payload, ensure_ascii=True)
                 assistant_message = MessageModel(
                     chat_id=chat_id,
@@ -569,8 +561,8 @@ async def _runpod_poll_and_emit(
                     },
                 )
                 db.add(assistant_message)
-                db.commit()
-                db.refresh(assistant_message)
+                await db.commit()
+                await db.refresh(assistant_message)
                 await chat_socket_manager.send_to_chat(
                     chat_id,
                     {
@@ -581,8 +573,6 @@ async def _runpod_poll_and_emit(
                         "error": status_payload,
                     },
                 )
-            finally:
-                db.close()
             return
 
         await asyncio.sleep(settings.runpod_status_poll_interval_seconds)
@@ -596,13 +586,18 @@ async def _runpod_poll_and_emit(
 async def runpod_chat(
     chat_id: str,
     payload: ChatRunpodRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    chat = db.get(ChatModel, chat_id)
+    chat = await db.get(ChatModel, chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    if chat.session and chat.session.user_id and chat.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(ChatModel, ChatModel.session_id == SessionModel.id)
+        .where(ChatModel.id == chat_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     return await _handle_runpod_request(chat_id=chat_id, payload=payload, db=db)
 
@@ -617,31 +612,26 @@ async def chat_socket(
         await websocket.close(code=1008)
         return
 
-    user_id = decode_access_token(token)
-    if not user_id:
+    try:
+        user = get_supabase_user(token)
+    except HTTPException:
         await websocket.close(code=1008)
         return
+    user_id = str(user["id"])
 
-    db = SessionLocal()
-    try:
-        revoked = (
-            db.query(RevokedToken)
-            .filter(RevokedToken.token_hash == token_hash(token))
-            .first()
-        )
-        if revoked:
-            await websocket.close(code=1008)
-            return
-
-        chat = db.get(ChatModel, chat_id)
+    async with SessionLocal() as db:
+        chat = await db.get(ChatModel, chat_id)
         if not chat:
             await websocket.close(code=1008)
             return
-        if chat.session and chat.session.user_id and chat.session.user_id != user_id:
+        owner = await db.scalar(
+            select(SessionModel.user_id)
+            .join(ChatModel, ChatModel.session_id == SessionModel.id)
+            .where(ChatModel.id == chat_id)
+        )
+        if owner and owner != user_id:
             await websocket.close(code=1008)
             return
-    finally:
-        db.close()
 
     await chat_socket_manager.connect(chat_id, websocket)
     try:
@@ -660,13 +650,12 @@ async def chat_socket(
                 request_model = ChatRunpodRequest.model_validate(request_payload)
             except Exception:
                 continue
-            db = SessionLocal()
-            try:
+            async with SessionLocal() as db:
                 response = await _handle_runpod_request(
-                    chat_id=chat_id, payload=request_model, db=db
+                    db=db,
+                    chat_id=chat_id,
+                    payload=request_model,
                 )
-            finally:
-                db.close()
             await chat_socket_manager.send_to_chat(
                 chat_id,
                 {

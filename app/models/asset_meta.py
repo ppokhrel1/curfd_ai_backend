@@ -22,7 +22,7 @@ class AssetMeta(Base, UUIDMixin, TimestampMixin):
     component_of: Mapped[str | None] = mapped_column(String(36), ForeignKey("assets.id"), nullable=True)
     position_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     image_paths_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    uploaded_by: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+    uploaded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     material_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_composite_of_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     used_for_json: Mapped[list | None] = mapped_column(JSON, nullable=True)

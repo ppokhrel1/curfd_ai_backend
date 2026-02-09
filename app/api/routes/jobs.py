@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
 from app.db.session import get_db
@@ -14,12 +15,12 @@ router = APIRouter()
 
 
 @router.post("", response_model=JobRead, status_code=status.HTTP_201_CREATED)
-def create_job(
+async def create_job(
     payload: JobCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    session = db.get(SessionModel, payload.session_id)
+    session = await db.get(SessionModel, payload.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id and session.user_id != user_id:
@@ -32,49 +33,64 @@ def create_job(
         output_format=payload.output_format,
     )
     db.add(job)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
     return job
 
 
 @router.get("", response_model=list[JobRead])
-def list_jobs(
+async def list_jobs(
     session_id: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    query = db.query(JobModel).join(SessionModel)
-    query = query.filter(SessionModel.user_id == user_id)
+    stmt = (
+        select(JobModel)
+        .join(SessionModel, JobModel.session_id == SessionModel.id)
+        .where(SessionModel.user_id == user_id)
+    )
     if session_id:
-        query = query.filter(JobModel.session_id == session_id)
-    return query.order_by(JobModel.created_at.desc()).all()
+        stmt = stmt.where(JobModel.session_id == session_id)
+    stmt = stmt.order_by(JobModel.created_at.desc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
 
 
 @router.get("/{job_id}", response_model=JobRead)
-def get_job(
+async def get_job(
     job_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    job = await db.get(JobModel, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     return job
 
 
 @router.patch("/{job_id}", response_model=JobRead)
-def update_job(
+async def update_job(
     job_id: str,
     payload: JobUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    job = await db.get(JobModel, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     if payload.status is not None:
@@ -90,43 +106,53 @@ def update_job(
     if payload.error is not None:
         job.error = payload.error
 
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
     return job
 
 
 @router.post("/{job_id}/start", response_model=JobRead)
-def start_job(
+async def start_job(
     job_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    job = await db.get(JobModel, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     job.status = "running"
     job.started_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
     return job
 
 
 @router.post("/{job_id}/complete", response_model=JobRead)
-def complete_job(
+async def complete_job(
     job_id: str,
     success: bool = True,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    job = await db.get(JobModel, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     job.status = "succeeded" if success else "failed"
     job.finished_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
     return job
