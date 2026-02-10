@@ -64,24 +64,10 @@ async def list_messages(
         .join(ChatModel, MessageModel.chat_id == ChatModel.id)
         .join(SessionModel, ChatModel.session_id == SessionModel.id)
         .where(SessionModel.user_id == user_id)
-        .order_by(MessageModel.created_at.asc())
-        .offset(offset)
-        .limit(limit)
     )
     if chat_id:
-        owner = await db.scalar(
-            select(SessionModel.user_id)
-            .join(ChatModel, ChatModel.session_id == SessionModel.id)
-            .where(ChatModel.id == chat_id)
-        )
-        chat_exists = await db.scalar(select(ChatModel.id).where(ChatModel.id == chat_id))
-        if not chat_exists:
-            logger.warning(f"Chat not found: {chat_id}")
-            raise HTTPException(status_code=404, detail="Chat not found")
-        if owner and owner != user_id:
-            logger.warning(f"User {user_id} forbidden from accessing chat {chat_id}")
-            raise HTTPException(status_code=403, detail="Forbidden")
         stmt = stmt.where(MessageModel.chat_id == chat_id)
+    stmt = stmt.order_by(MessageModel.created_at.asc()).offset(offset).limit(limit)
 
     try:
         result = await asyncio.wait_for(db.execute(stmt), timeout=QUERY_TIMEOUT_SECONDS)
