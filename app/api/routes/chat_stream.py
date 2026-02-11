@@ -50,7 +50,7 @@ class AssetContext(TypedDict, total=False):
 
 
 def _serialize_message(message: MessageModel) -> dict[str, Any]:
-    return MessageRead.model_validate(message).model_dump()
+    return MessageRead.model_validate(message).model_dump(mode="json")
 
 
 def _normalize_action(action: str) -> str:
@@ -88,7 +88,7 @@ async def _load_chat_history(db: AsyncSession, chat_id: str) -> list[dict]:
 
 
 def _serialize_asset(asset: AssetModel) -> dict[str, Any]:
-    return AssetRead.model_validate(asset).model_dump()
+    return AssetRead.model_validate(asset).model_dump(mode="json")
 
 
 async def _load_serialized_messages(
