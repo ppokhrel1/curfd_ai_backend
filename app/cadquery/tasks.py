@@ -6,6 +6,7 @@ import subprocess
 import logging
 import re
 import json
+import time
 from .celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -110,3 +111,34 @@ else:
          raise RuntimeError("Output file was not created.")
 
     return output_filename
+    return output_filename
+
+@celery_app.task
+def prune_generated_files():
+    """
+    Deletes files in GENERATED_FILES_DIR that are older than 5 hours.
+    """
+    logger.info("Starting file pruning...")
+    cutoff_time = time.time() - (5 * 3600) # 5 hours ago
+    deleted_count = 0
+    
+    try:
+        if not os.path.exists(GENERATED_FILES_DIR):
+            logger.info("Generated files directory does not exist.")
+            return
+
+        for filename in os.listdir(GENERATED_FILES_DIR):
+            file_path = os.path.join(GENERATED_FILES_DIR, filename)
+            if os.path.isfile(file_path):
+                file_mtime = os.path.getmtime(file_path)
+                if file_mtime < cutoff_time:
+                    try:
+                        os.remove(file_path)
+                        deleted_count += 1
+                        logger.info(f"Deleted old file: {filename}")
+                    except OSError as e:
+                        logger.error(f"Error deleting file {filename}: {e}")
+        
+        logger.info(f"Pruning complete. Deleted {deleted_count} files.")
+    except Exception as e:
+        logger.error(f"Error during file pruning: {e}")

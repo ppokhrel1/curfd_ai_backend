@@ -47,6 +47,20 @@ services:
       - ./.env:/code/.env
       - generated-files:/app/generated_files
 
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app beat --loglevel=info
+    env_file:
+      - ./.env
+    depends_on:
+      - redis
+    volumes:
+      - ./app:/code/app
+      - ./.env:/code/.env
+      - generated-files:/app/generated_files
+
   redis:
     image: redis:alpine
     volumes:
