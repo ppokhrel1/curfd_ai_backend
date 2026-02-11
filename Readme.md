@@ -7,6 +7,7 @@ FastAPI backend for session management, chat records, and 3D generation workflow
 - User registration and login (bcrypt password hashing)
 - Message storage
 - 3D generation job tracking
+- **CadQuery Generation**: Async service for generating CAD models from Python scripts (STL/STEP)
 - Asset registration for outputs (STL/GLB/images)
 - Postgres default, Alembic-ready
 

@@ -142,3 +142,12 @@ Non-JSON payloads, unsupported message types, or invalid payload models are igno
 - This route module assumes chat ownership is represented by `sessions.user_id`.
 - WebSocket auth uses token query param, not Authorization headers.
 - JSON outputs are normalized to be datetime-safe before persistence and socket emission.
+
+## CadQuery Integration
+
+While this document focuses on Runpod-based chat generation, the system also supports direct CadQuery script execution via:
+- `POST /api/v1/cadquery/generate`
+- `POST /api/v1/cadquery/upload`
+- `WS /api/v1/cadquery/ws/{task_id}`
+
+These endpoints run on a dedicated Celery worker with a specialized environment (`.venv-cad`) containing `cadquery` and `OCP`. They provide an alternative to the Runpod flow for local generation.

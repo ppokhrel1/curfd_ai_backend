@@ -31,11 +31,17 @@ async def upload_cad_script(
     """
     Upload a CadQuery script file for generation.
     """
-    content = await file.read()
-    script_content = content.decode("utf-8")
-    
-    task = generate_cad.delay(script_content, output_format)
-    return {"task_id": task.id, "status": "processing"}
+    try:
+        content = await file.read()
+        try:
+            script_content = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid file encoding. Please upload a valid UTF-8 text file.")
+        
+        task = generate_cad.delay(script_content, output_format)
+        return {"task_id": task.id, "status": "processing"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.websocket("/ws/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):

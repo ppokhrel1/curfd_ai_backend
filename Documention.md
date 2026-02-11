@@ -349,6 +349,34 @@ curl -X DELETE http://localhost:8000/api/v1/asset-meta/<meta_id> \\
   -H "Authorization: Bearer <access_token>"
 ```
 
+### CadQuery
+- `POST /cadquery/generate`
+```bash
+curl -X POST http://localhost:8000/api/v1/cadquery/generate \\
+  -H "Content-Type: application/json" \\
+  -d '{"script":"import cadquery as cq; result = cq.Workplane(\"XY\").box(10, 10, 10)","format":"STL"}'
+```
+Response:
+```json
+{"task_id":"<task_id>","status":"processing"}
+```
+- `POST /cadquery/upload`
+```bash
+curl -X POST http://localhost:8000/api/v1/cadquery/upload \\
+     -F "file=@/path/to/script.py" \\
+     -F "output_format=STL"
+```
+Response:
+```json
+{"task_id":"<task_id>","status":"processing"}
+```
+- `WS /cadquery/ws/{task_id}`
+Listen for status updates. Returns JSON with `status` ("PENDING", "SUCCESS", "FAILURE") and `result` (filename) or `error` (structured object).
+- `GET /cadquery/download/{filename}`
+```bash
+curl -O http://localhost:8000/api/v1/cadquery/download/<filename>
+```
+
 ## Notes
 - Vector DB and object storage integrations are stubbed via metadata fields and asset records.
 - Use Alembic for migrations when moving beyond local SQLite.
