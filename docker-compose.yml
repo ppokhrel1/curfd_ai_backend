@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: always
     # -------- replace with comment to run with gunicorn --------
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     # command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
@@ -37,6 +38,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: always
     command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app worker --loglevel=info
     env_file:
       - ./.env
@@ -51,6 +53,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: always
     command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app beat --loglevel=info
     env_file:
       - ./.env
@@ -63,6 +66,7 @@ services:
 
   redis:
     image: redis:alpine
+    restart: always
     volumes:
       - redis-data:/data
     expose:
