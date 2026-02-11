@@ -14,37 +14,38 @@ services:
     # expose:
     #   - "8000"
     depends_on:
-      - db
       - redis
     volumes:
-      - ./src/app:/code/app
-      - ./src/.env:/code/.env
+      - ./app:/code/app
+      - ./.env:/code/.env
+      - generated-files:/app/generated_files
 
-  worker:
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   command: arq app.core.worker.settings.WorkerSettings
+  #   env_file:
+  #     - ./.env
+  #   depends_on:
+  #     - redis
+  #   volumes:
+  #     - ./app:/code/app
+  #     - ./.env:/code/.env
+
+  celery_worker:
     build:
       context: .
       dockerfile: Dockerfile
-    command: arq app.core.worker.settings.WorkerSettings
+    command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app worker --loglevel=info
     env_file:
-      - ./src/.env
+      - ./.env
     depends_on:
-      - db
       - redis
     volumes:
-      - ./src/app:/code/app
-      - ./src/.env:/code/.env
-
-  db:
-    image: postgres:13
-    env_file:
-      - ./src/.env
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    # -------- replace with comment to run migrations with docker --------
-    expose:
-      - "5432"
-    # ports:
-    #  - 5432:5432
+      - ./app:/code/app
+      - ./.env:/code/.env
+      - generated-files:/app/generated_files
 
   redis:
     image: redis:alpine
@@ -63,7 +64,7 @@ services:
   #   volumes:
   #     - pgadmin-data:/var/lib/pgadmin
   #   env_file:
-  #     - ./src/.env
+  #     - ./.env
   #   depends_on:
   #     - db
 
@@ -83,7 +84,7 @@ services:
   #     context: .
   #     dockerfile: Dockerfile
   #   env_file:
-  #     - ./src/.env
+  #     - ./.env
   #   depends_on:
   #     - db
   #     - web
@@ -106,6 +107,6 @@ services:
   #     - ./src:/code/src
 
 volumes:
-  postgres-data:
   redis-data:
+  generated-files:
   #pgadmin-data:

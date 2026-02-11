@@ -22,11 +22,28 @@ RUN uv venv /app/.venv
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements.txt
 
+
+# 3b. Install dependencies for CadQuery (Separate Venv)
+COPY requirements-cad.txt /app/requirements-cad.txt
+RUN uv venv /app/.venv-cad
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VIRTUAL_ENV=/app/.venv-cad uv pip install -r requirements-cad.txt
+
 # 4. Copy the rest of the project source code
 COPY . /app
 
 # --------- Final Stage ---------
 FROM python:3.11-slim-bookworm
+
+# Install system dependencies required for CadQuery/OCP
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libxrender1 \
+    build-essential \
+    libncurses-dev \
+    libreadline-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 
 # Create a non-root user for security
 # Using fixed GID and UID for consistency
@@ -35,6 +52,7 @@ RUN groupadd --gid 1000 app \
 
 # Copy the virtual environment from the builder stage
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /app/.venv-cad /app/.venv-cad
 
 # Copy the application source code
 # Note: The source code is copied from /app (builder) to /code (final)
@@ -42,6 +60,9 @@ COPY --from=builder --chown=app:app /app /code
 
 # Ensure the virtual environment's executables are in the PATH
 ENV PATH="/app/.venv/bin:$PATH"
+
+# Create generated files directory and set ownership
+RUN mkdir -p /app/generated_files && chown -R app:app /app/generated_files
 
 # Switch to the non-root user and set the working directory
 USER app

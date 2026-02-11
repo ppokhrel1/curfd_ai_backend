@@ -1,0 +1,81 @@
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
+import os
+from typing import Optional
+from pydantic import BaseModel
+from celery.result import AsyncResult
+from app.cadquery.tasks import generate_cad
+from app.cadquery.celery_app import celery_app
+import asyncio
+import json
+
+router = APIRouter()
+
+class GenerateRequest(BaseModel):
+    script: str
+    format: str = "STL"
+
+@router.post("/generate")
+async def generate_cad_model(request: GenerateRequest):
+    """
+    Submit a CadQuery script for generation.
+    """
+    task = generate_cad.delay(request.script, request.format)
+    return {"task_id": task.id, "status": "processing"}
+
+@router.post("/upload")
+async def upload_cad_script(
+    file: UploadFile = File(...),
+    output_format: str = Form("STL")
+):
+    """
+    Upload a CadQuery script file for generation.
+    """
+    content = await file.read()
+    script_content = content.decode("utf-8")
+    
+    task = generate_cad.delay(script_content, output_format)
+    return {"task_id": task.id, "status": "processing"}
+
+@router.websocket("/ws/{task_id}")
+async def websocket_endpoint(websocket: WebSocket, task_id: str):
+    await websocket.accept()
+    try:
+        while True:
+            result = AsyncResult(task_id, app=celery_app)
+            status = result.status
+            response = {"task_id": task_id, "status": status}
+            
+            if status == 'SUCCESS':
+                response["result"] = result.result
+                await websocket.send_text(json.dumps(response))
+                break
+            elif status == 'FAILURE':
+                error_msg = str(result.result)
+                try:
+                    # Try to parse the error message as JSON
+                    # The task now returns a JSON string for structured errors
+                    error_data = json.loads(error_msg)
+                    response["error"] = error_data
+                except json.JSONDecodeError:
+                    # Fallback for other errors
+                    response["error"] = error_msg
+                    
+                await websocket.send_text(json.dumps(response))
+                break
+            else:
+                await websocket.send_text(json.dumps(response))
+                await asyncio.sleep(1) 
+    except WebSocketDisconnect:
+        print(f"Client disconnected for task {task_id}")
+
+@router.get("/download/{filename}")
+async def download_file(filename: str):
+    """
+    Download a generated CAD file.
+    """
+    file_path = os.path.join("/app/generated_files", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(file_path, filename=filename)

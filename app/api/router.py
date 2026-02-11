@@ -10,6 +10,7 @@ from app.api.routes import (
     jobs,
     messages,
     sessions,
+    cadquery,
 )
 
 api_router = APIRouter()
@@ -23,3 +24,4 @@ api_router.include_router(chat_stream.router, tags=["chat-stream"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(assets.router, prefix="/assets", tags=["assets"])
 api_router.include_router(asset_meta.router, prefix="/asset-meta", tags=["asset-meta"])
+api_router.include_router(cadquery.router, prefix="/cadquery", tags=["cadquery"])
