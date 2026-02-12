@@ -20,8 +20,6 @@ from app.models.message import Message as MessageModel
 from app.schemas.message import MessageCreate, MessageRead
 
 load_dotenv()
-# Configure API Key
-
 
 # Define the System Instruction for the CAD Expert
 CAD_SYSTEM_INSTRUCTION = """You are a Senior CAD Engineer and Geometric Reasoning Expert.

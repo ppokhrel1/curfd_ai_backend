@@ -1,7 +1,9 @@
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
 from app.db.session import get_db
@@ -11,18 +13,22 @@ from app.schemas.job import JobCreate, JobRead, JobUpdate
 from app.services.pipeline import build_default_spec
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=JobRead, status_code=status.HTTP_201_CREATED)
-def create_job(
+async def create_job(
     payload: JobCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    session = db.get(SessionModel, payload.session_id)
+    logger.info(f"User {user_id} creating job for session {payload.session_id}")
+    session = await db.get(SessionModel, payload.session_id)
     if not session:
+        logger.warning(f"Session not found: {payload.session_id}")
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id and session.user_id != user_id:
+        logger.warning(f"User {user_id} forbidden from accessing session {payload.session_id}")
         raise HTTPException(status_code=403, detail="Forbidden")
     job = JobModel(
         session_id=payload.session_id,
@@ -32,101 +38,134 @@ def create_job(
         output_format=payload.output_format,
     )
     db.add(job)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
+    logger.info(f"Job {job.id} created for session {payload.session_id}")
     return job
 
 
 @router.get("", response_model=list[JobRead])
-def list_jobs(
+async def list_jobs(
     session_id: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    query = db.query(JobModel).join(SessionModel)
-    query = query.filter(SessionModel.user_id == user_id)
+    logger.info(f"User {user_id} listing jobs for session {session_id}")
+    stmt = (
+        select(JobModel)
+        .join(SessionModel, JobModel.session_id == SessionModel.id)
+        .where(SessionModel.user_id == user_id)
+    )
     if session_id:
-        query = query.filter(JobModel.session_id == session_id)
-    return query.order_by(JobModel.created_at.desc()).all()
+        stmt = stmt.where(JobModel.session_id == session_id)
+    stmt = stmt.order_by(JobModel.created_at.desc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
 
 
 @router.get("/{job_id}", response_model=JobRead)
-def get_job(
+async def get_job(
     job_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    logger.info(f"User {user_id} getting job {job_id}")
+    job = await db.get(JobModel, job_id)
     if not job:
+        logger.warning(f"Job not found: {job_id}")
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
+        logger.warning(f"User {user_id} forbidden from accessing job {job_id}")
         raise HTTPException(status_code=403, detail="Forbidden")
     return job
 
 
 @router.patch("/{job_id}", response_model=JobRead)
-def update_job(
+async def update_job(
     job_id: str,
     payload: JobUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    logger.info(f"User {user_id} updating job {job_id} with payload: {payload.model_dump_json(exclude_unset=True)}")
+    job = await db.get(JobModel, job_id)
     if not job:
+        logger.warning(f"Job not found: {job_id}")
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
+        logger.warning(f"User {user_id} forbidden from updating job {job_id}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if payload.status is not None:
-        job.status = payload.status
-    if payload.spec_json is not None:
-        job.spec_json = payload.spec_json
-    if payload.output_format is not None:
-        job.output_format = payload.output_format
-    if payload.started_at is not None:
-        job.started_at = payload.started_at
-    if payload.finished_at is not None:
-        job.finished_at = payload.finished_at
-    if payload.error is not None:
-        job.error = payload.error
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(job, key, value)
 
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
+    logger.info(f"Job {job_id} updated by user {user_id}")
     return job
 
 
 @router.post("/{job_id}/start", response_model=JobRead)
-def start_job(
+async def start_job(
     job_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    logger.info(f"User {user_id} starting job {job_id}")
+    job = await db.get(JobModel, job_id)
     if not job:
+        logger.warning(f"Job not found: {job_id}")
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
+        logger.warning(f"User {user_id} forbidden from starting job {job_id}")
         raise HTTPException(status_code=403, detail="Forbidden")
     job.status = "running"
     job.started_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
+    logger.info(f"Job {job_id} started by user {user_id}")
     return job
 
 
 @router.post("/{job_id}/complete", response_model=JobRead)
-def complete_job(
+async def complete_job(
     job_id: str,
     success: bool = True,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = db.get(JobModel, job_id)
+    logger.info(f"User {user_id} completing job {job_id} with success={success}")
+    job = await db.get(JobModel, job_id)
     if not job:
+        logger.warning(f"Job not found: {job_id}")
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.session and job.session.user_id and job.session.user_id != user_id:
+    owner = await db.scalar(
+        select(SessionModel.user_id)
+        .join(JobModel, JobModel.session_id == SessionModel.id)
+        .where(JobModel.id == job_id)
+    )
+    if owner and owner != user_id:
+        logger.warning(f"User {user_id} forbidden from completing job {job_id}")
         raise HTTPException(status_code=403, detail="Forbidden")
     job.status = "succeeded" if success else "failed"
     job.finished_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
+    logger.info(f"Job {job_id} completed by user {user_id}")
     return job

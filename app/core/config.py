@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
 
-    cors_allow_origins: str = "*"
+    cors_allow_origins: str = "http://localhost:3000,http://localhost:5173,https://nooriat.com,https://nooriat.org,https://www.nooriat.com,https://www.nooriat.org"
+    trusted_hosts: str = "localhost,127.0.0.1,[::1],clownfish-app-ipxaa.ondigitalocean.app,*.ondigitalocean.app"
 
     secret_key: str | None = None
     algorithm: str = "HS256"
@@ -51,6 +52,11 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     hf_token: str | None = None
     replicate_api_token: str | None = None
+
+    runpod_base_url: str = "https://api.runpod.ai/v2/k91olo35clkkky"
+    runpod_api_token: str | None = None
+    runpod_status_poll_interval_seconds: float = 2.5
+    runpod_status_timeout_seconds: int = 7200
 
 
 settings = Settings()

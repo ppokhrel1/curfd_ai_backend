@@ -7,6 +7,7 @@ FastAPI backend for session management, chat records, and 3D generation workflow
 - User registration and login (bcrypt password hashing)
 - Message storage
 - 3D generation job tracking
+- **CadQuery Generation**: Async service for generating CAD models from Python scripts (STL/STEP)
 - Asset registration for outputs (STL/GLB/images)
 - Postgres default, Alembic-ready
 
@@ -48,3 +49,5 @@ uvicorn app.main:app --reload
 - Supabase CLI: `python -m app.cli supabase-get /rest/v1/users --param select=*`
 - Supabase API: set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` if you want to call Supabase APIs
 - Migrations: `alembic` folder ready for `alembic revision` and `alembic upgrade`
+- Runpod: set `RUNPOD_API_TOKEN` (and optionally `RUNPOD_BASE_URL`) in `.env` to enable chat runpod flow
+- Runpod actions: `process_requirements`, `generate_scad`, `health` (history + sync supported via `/chats/{chat_id}/runpod` or the chat socket)

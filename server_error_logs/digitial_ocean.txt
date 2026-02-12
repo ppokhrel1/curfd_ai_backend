@@ -1,0 +1,71 @@
+Feb 11 04:25:31  TypeError: Object of type datetime is not JSON serializable
+Feb 11 04:25:31  INFO:     connection closed
+Feb 11 04:25:36  2026-02-11 04:25:36,347 INFO httpx HTTP Request: GET https://ucamqctnymoxmxzodizj.supabase.co/auth/v1/user "HTTP/1.1 200 OK"
+Feb 11 04:25:36  INFO:     ('2404:7c00:4a:a4fa:d5fd:a638:f664:22c4', 0) - "WebSocket /api/v1/chat-socket/1f0d8ced-a764-4c24-90fc-5135390a66bf?token=eyJhbGciOiJIUzI1NiIsImtpZCI6IlUwUXRSeUcyR3p0MlI0ci8iLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL3VjYW1xY3RueW1veG14em9kaXpqLnN1cGFiYXNlLmNvL2F1dGgvdjEiLCJzdWIiOiJmMGE2MmYzZC02OGEwLTQ3YzEtYmM0Zi00ZDRjOWZjYzBlZTQiLCJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoxNzcwNzg3NDIzLCJpYXQiOjE3NzA3ODM4MjMsImVtYWlsIjoiYW51cEBzaXAuY29tLm5wIiwicGhvbmUiOiIiLCJhcHBfbWV0YWRhdGEiOnsicHJvdmlkZXIiOiJlbWFpbCIsInByb3ZpZGVycyI6WyJlbWFpbCJdfSwidXNlcl9tZXRhZGF0YSI6eyJkaXNwbGF5X25hbWUiOiJBbnVwIEFkaGlrYXJpIiwiZW1haWwiOiJhbnVwQHNpcC5jb20ubnAiLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwicGhvbmVfdmVyaWZpZWQiOmZhbHNlLCJzdWIiOiJmMGE2MmYzZC02OGEwLTQ3YzEtYmM0Zi00ZDRjOWZjYzBlZTQifSwicm9sZSI6ImF1dGhlbnRpY2F0ZWQiLCJhYWwiOiJhYWwxIiwiYW1yIjpbeyJtZXRob2QiOiJwYXNzd29yZCIsInRpbWVzdGFtcCI6MTc3MDc4MzgyM31dLCJzZXNzaW9uX2lkIjoiNGNlOTI4MjYtOTM4ZS00MjQ5LWJjNGMtNjQ3YzMzODAwNmNhIiwiaXNfYW5vbnltb3VzIjpmYWxzZX0.z-iP2Y-ZKOgDXAt0303TUkiwJxtNLUjYhfgMUnRiF6U" [accepted]
+Feb 11 04:25:36  INFO:     connection open
+Feb 11 04:25:36  ERROR:    Exception in ASGI application
+Feb 11 04:25:36  Traceback (most recent call last):
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/uvicorn/protocols/websockets/websockets_impl.py", line 244, in run_asgi
+Feb 11 04:25:36      result = await self.app(self.scope, self.asgi_receive, self.asgi_send)  # type: ignore[func-returns-value]
+Feb 11 04:25:36               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 70, in _call_
+Feb 11 04:25:36      return await self.app(scope, receive, send)
+Feb 11 04:25:36             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/fastapi/applications.py", line 1054, in _call_
+Feb 11 04:25:36      await super()._call_(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/applications.py", line 112, in _call_
+Feb 11 04:25:36      await self.middleware_stack(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 152, in _call_
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 100, in _call_
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 100, in _call_
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/gzip.py", line 22, in _call_
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 77, in _call_
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 70, in _call_
+Feb 11 04:25:36      return await self.app(scope, receive, send)
+Feb 11 04:25:36             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/trustedhost.py", line 51, in _call_
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 62, in _call_
+Feb 11 04:25:36      await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+Feb 11 04:25:36      raise exc
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+Feb 11 04:25:36      await app(scope, receive, sender)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/routing.py", line 715, in _call_
+Feb 11 04:25:36      await self.middleware_stack(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/routing.py", line 735, in app
+Feb 11 04:25:36      await route.handle(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/routing.py", line 362, in handle
+Feb 11 04:25:36      await self.app(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/routing.py", line 95, in app
+Feb 11 04:25:36      await wrap_app_handling_exceptions(app, session)(scope, receive, send)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+Feb 11 04:25:36      raise exc
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+Feb 11 04:25:36      await app(scope, receive, sender)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/routing.py", line 93, in app
+Feb 11 04:25:36      await func(session)
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 383, in app
+Feb 11 04:25:36      await dependant.call(**solved_result.values)
+Feb 11 04:25:36    File "/code/app/api/routes/chat_stream.py", line 721, in chat_socket
+Feb 11 04:25:36      await websocket.send_json(
+Feb 11 04:25:36    File "/app/.venv/lib/python3.11/site-packages/starlette/websockets.py", line 173, in send_json
+Feb 11 04:25:36      text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+Feb 11 04:25:36             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Feb 11 04:25:36    File "/usr/local/lib/python3.11/json/_init_.py", line 238, in dumps
+Feb 11 04:25:36      **kw).encode(obj)
+Feb 11 04:25:36            ^^^^^^^^^^^
+Feb 11 04:25:36    File "/usr/local/lib/python3.11/json/encoder.py", line 200, in encode
+Feb 11 04:25:36      chunks = self.iterencode(o, _one_shot=True)
+Feb 11 04:25:36               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Feb 11 04:25:36    File "/usr/local/lib/python3.11/json/encoder.py", line 258, in iterencode
+Feb 11 04:25:36      return _iterencode(o, 0)
+Feb 11 04:25:36             ^^^^^^^^^^^^^^^^^
+Feb 11 04:25:36    File "/usr/local/lib/python3.11/json/encoder.py", line 180, in default
+Feb 11 04:25:36      raise TypeError(f'Object of type {o._class.name_} '
+Feb 11 04:25:36  TypeError: Object of type datetime is not JSON serializable
