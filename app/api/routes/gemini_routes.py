@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.helpers.gemini_helpers import get_chat_history
 
-from app.db.session import get_db_async
+from app.db.session import get_db
 from app.models.chat import Chat as ChatModel
 from app.models.message import Message as MessageModel
 from app.schemas.message import MessageCreate, MessageRead
@@ -51,7 +51,7 @@ router = APIRouter()
 @router.post("/process_requirements", response_model=MessageRead)
 async def process_requirements(
     payload: MessageCreate,
-    db: AsyncSession = Depends(get_db_async), 
+    db: AsyncSession = Depends(get_db), 
     user_id: str = Depends(get_current_user_id_async)
 ):
 

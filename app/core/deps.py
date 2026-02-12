@@ -7,7 +7,7 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 
 from app.core.jwt import decode_access_token, token_hash
-from app.db.session import get_db, get_db_async
+from app.db.session import get_db
 from app.models.revoked_token import RevokedToken
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,7 +88,7 @@ def get_current_user_id(
 
 async def get_current_user_id_async(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: AsyncSession = Depends(get_db_async),
+    db: AsyncSession = Depends(get_db),
 ) -> str:
     token = credentials.credentials
     user_id = decode_access_token(token)
