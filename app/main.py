@@ -69,8 +69,11 @@ def create_app() -> FastAPI:
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     @app.on_event("startup")
-    def on_startup() -> None:
-        Base.metadata.create_all(bind=engine)
+    async def on_startup():
+        # 2. Use the engine's async context manager
+        async with engine.begin() as conn:
+            # 3. Use run_sync to execute the blocking create_all method
+            await conn.run_sync(Base.metadata.create_all)
 
     return app
 
