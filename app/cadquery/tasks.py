@@ -56,8 +56,12 @@ import sys
 
 # Export logic (appended)
 if 'result' in locals():
-    cq.exporters.export(result, '{output_path}')
-    print(f"Exported to {{'{output_path}'}}")
+    try:
+        cq.exporters.export(result, '{output_path}')
+        print(f"Exported to {{'{output_path}'}}")
+    except Exception as e:
+        print(f"Export failed: {{e}}", file=sys.stderr)
+        sys.exit(1)
 else:
     print("No 'result' variable found in script.", file=sys.stderr)
     sys.exit(1)
