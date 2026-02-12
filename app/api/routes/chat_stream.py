@@ -167,6 +167,11 @@ async def _persist_generate_scad_asset(
     if not chat:
         logger.error(f"Chat not found: {chat_id}")
         return None
+    
+    # FIX: Capture the session_id immediately. 
+    # Any 'await db.commit()' below will expire the 'chat' instance, 
+    # making chat.session_id inaccessible without a re-fetch.
+    current_session_id = chat.session_id
 
     resolved_job = None
     if job_id:
@@ -183,7 +188,7 @@ async def _persist_generate_scad_asset(
                 "description_natural_language"
             )
         resolved_job = JobModel(
-            session_id=chat.session_id,
+            session_id=current_session_id,
             status="succeeded",
             prompt=prompt,
             spec_json=requirements_json,
@@ -215,9 +220,11 @@ async def _persist_generate_scad_asset(
     await db.refresh(asset)
     logger.info(f"Created asset with id: {asset.id}")
 
+    # Use the local current_session_id variable to avoid lazy-loading on the expired 'chat' object
     uploaded_by = await db.scalar(
-        select(SessionModel.user_id).where(SessionModel.id == chat.session_id)
+        select(SessionModel.user_id).where(SessionModel.id == current_session_id)
     )
+    
     meta = AssetMetaModel(
         asset_id=asset.id,
         part_name=data.get("filename"),
@@ -225,11 +232,11 @@ async def _persist_generate_scad_asset(
     )
     db.add(meta)
     await db.commit()
+    
     await db.refresh(asset)
     logger.info(f"Created asset_meta for asset_id: {asset.id}")
 
     return _serialize_asset(asset)
-
 
 async def _handle_runpod_request(
     *,

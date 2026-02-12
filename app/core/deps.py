@@ -91,26 +91,32 @@ async def get_current_user_id_async(
     db: AsyncSession = Depends(get_db),
 ) -> str:
     token = credentials.credentials
-    user_id = decode_access_token(token)
     
+    # 1. Call Supabase Auth API (Just like the sync version, but async)
+    headers = {
+        "apikey": _supabase_api_key(),
+        "Authorization": f"Bearer {token}",
+    }
+    
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            response = await client.get(f"{_supabase_base_url()}/auth/v1/user", headers=headers)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=503, detail="Supabase auth service unavailable")
+
+    if response.status_code >= 400:
+        detail = "Invalid token"
+        try:
+            payload = response.json()
+            detail = payload.get("msg") or payload.get("error_description") or detail
+        except:
+            pass
+        raise HTTPException(status_code=401, detail=detail)
+
+    user_data = response.json()
+    user_id = user_data.get("id")
+
     if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Invalid token"
-        )
+        raise HTTPException(status_code=401, detail="Invalid token structure")
 
-    # Hash the token to check revocation
-    token_digest = token_hash(token)
-    
-    # ASYNC DATABASE CHECK
-    stmt = select(RevokedToken).where(RevokedToken.token_hash == token_digest)
-    result = await db.execute(stmt)
-    revoked = result.scalar_one_or_none()
-    
-    if revoked:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Token revoked"
-        )
-
-    return user_id
+    return str(user_id)
