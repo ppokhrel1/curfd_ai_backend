@@ -14,8 +14,8 @@ services:
       - "8000:8000"
     # expose:
     #   - "8000"
-    depends_on:
-      - redis
+    # depends_on:
+    #   - redis
     volumes:
       - ./app:/code/app
       - ./.env:/code/.env
@@ -34,43 +34,43 @@ services:
   #     - ./app:/code/app
   #     - ./.env:/code/.env
 
-  celery_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: always
-    command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app worker --loglevel=info
-    env_file:
-      - ./.env
-    depends_on:
-      - redis
-    volumes:
-      - ./app:/code/app
-      - ./.env:/code/.env
-      - generated-files:/app/generated_files
+  # celery_worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   restart: always
+  #   command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app worker --loglevel=info
+  #   env_file:
+  #     - ./.env
+  #   depends_on:
+  #     - redis
+  #   volumes:
+  #     - ./app:/code/app
+  #     - ./.env:/code/.env
+  #     - generated-files:/app/generated_files
 
-  celery_beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: always
-    command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app beat --loglevel=info
-    env_file:
-      - ./.env
-    depends_on:
-      - redis
-    volumes:
-      - ./app:/code/app
-      - ./.env:/code/.env
-      - generated-files:/app/generated_files
+  # celery_beat:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   restart: always
+  #   command: /app/.venv-cad/bin/celery -A app.cadquery.celery_app beat --loglevel=info
+  #   env_file:
+  #     - ./.env
+  #   depends_on:
+  #     - redis
+  #   volumes:
+  #     - ./app:/code/app
+  #     - ./.env:/code/.env
+  #     - generated-files:/app/generated_files
 
-  redis:
-    image: redis:alpine
-    restart: always
-    volumes:
-      - redis-data:/data
-    expose:
-      - "6379"
+  # redis:
+  #   image: redis:alpine
+  #   restart: always
+  #   volumes:
+  #     - redis-data:/data
+  #   expose:
+  #     - "6379"
 
   #-------- uncomment to run with pgadmin --------
   # pgadmin:
@@ -125,6 +125,6 @@ services:
   #     - ./src:/code/src
 
 volumes:
-  redis-data:
+#   redis-data:
   generated-files:
   #pgadmin-data:

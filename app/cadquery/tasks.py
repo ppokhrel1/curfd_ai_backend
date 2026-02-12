@@ -7,19 +7,25 @@ import logging
 import re
 import json
 import time
-from .celery_app import celery_app
+
+# from .celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
-GENERATED_FILES_DIR = "/app/generated_files"
-os.makedirs(GENERATED_FILES_DIR, exist_ok=True)
+GENERATED_FILES_DIR = os.getenv("GENERATED_FILES_DIR", "/app/generated_files")
+try:
+    os.makedirs(GENERATED_FILES_DIR, exist_ok=True)
+except OSError:
+    logger.warning(f"Could not create directory {GENERATED_FILES_DIR}. Using current directory as fallback.")
+    GENERATED_FILES_DIR = os.path.join(os.getcwd(), "generated_files")
+    os.makedirs(GENERATED_FILES_DIR, exist_ok=True)
 
-@celery_app.task(bind=True)
-def generate_cad(self, script_content: str, output_format: str = "STL"):
+# @celery_app.task(bind=True)
+def generate_cad(task_id: str, script_content: str, output_format: str = "STL"):
     """
     Generates a CAD file from the provided script content.
     """
-    task_id = self.request.id
+    # task_id = self.request.id
     logger.info(f"Starting CAD generation for task {task_id}")
 
     # Create a temporary python file for the script
@@ -60,17 +66,19 @@ else:
     with open(script_path, "w") as f:
         f.write(wrapper_code)
 
-    # Execute the script using the SAME python interpreter (or the one in the venv)
-    # Since this worker IS running in .venv-cad, 'python' should be correct.
+    # Execute the script using the CadQuery venv interpreter if available
+    cad_venv_python = "/app/.venv-cad/bin/python"
+    python_executable = cad_venv_python if os.path.exists(cad_venv_python) else sys.executable
+    
     try:
         result = subprocess.run(
-            [sys.executable, script_path], 
+            [python_executable, script_path], 
             capture_output=True, 
             text=True, 
             cwd=GENERATED_FILES_DIR,
             check=True
         )
-        logger.info(f"Script execution output: {result.stdout}")
+        logger.info(f"Script execution output with {python_executable}: {result.stdout}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Script execution failed: {e.stderr}")
         
@@ -113,7 +121,7 @@ else:
     return output_filename
     return output_filename
 
-@celery_app.task
+# @celery_app.task
 def prune_generated_files():
     """
     Deletes files in GENERATED_FILES_DIR that are older than 5 hours.
