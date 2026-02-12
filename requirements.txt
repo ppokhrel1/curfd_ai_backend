@@ -22,5 +22,4 @@ pytest-cov
 asyncpg
 arq
 
-google-genai
 python-dotenv

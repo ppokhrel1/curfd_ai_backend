@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.jwt import create_access_token_with_exp, decode_token_payload, token_hash
 from app.db.base import Base
-from app.db.session import SessionLocal, engine
+from app.db.session import AsyncSessionLocal, SessionLocal, engine
 from app.models.revoked_token import RevokedToken
 import app.models  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -67,22 +67,26 @@ def create_app() -> FastAPI:
         if auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
             payload = decode_token_payload(token, verify_exp=True)
+            
             if payload and payload.get("sub"):
                 exp = payload.get("exp")
                 if isinstance(exp, (int, float)):
                     now_ts = datetime.now(timezone.utc).timestamp()
                     seconds_left = exp - now_ts
+                    
+                    # If token is valid but expiring within 10 minutes (600s)
                     if 0 < seconds_left <= 600:
-                        async with SessionLocal() as db:
-                            try:
-                                stmt = select(RevokedToken).where(
-                                    RevokedToken.token_hash == token_hash(token)
-                                )
-                                result = await db.execute(stmt)
-                                revoked = result.scalars().first()
-                            finally:
-                                await db.close()
+                        # FIX: Use AsyncSessionLocal instead of SessionLocal
+                        async with AsyncSessionLocal() as db:
+                            stmt = select(RevokedToken).where(
+                                RevokedToken.token_hash == token_hash(token)
+                            )
+                            result = await db.execute(stmt)
+                            revoked = result.scalars().first()
+                        
+
                         if not revoked:
+                            # Extend the expiry by 10 minutes
                             new_exp = datetime.fromtimestamp(exp, tz=timezone.utc) + timedelta(
                                 minutes=10
                             )
@@ -93,9 +97,13 @@ def create_app() -> FastAPI:
                             )
 
         response = await call_next(request)
+        
         if refresh_token and refresh_exp:
             response.headers["X-Refresh-Token"] = refresh_token
             response.headers["X-Refresh-Token-Expires-At"] = refresh_exp.isoformat()
+
+            response.headers["Access-Control-Expose-Headers"] = "X-Refresh-Token, X-Refresh-Token-Expires-At"
+            
         return response
 
     app.include_router(api_router, prefix=settings.api_v1_prefix)
