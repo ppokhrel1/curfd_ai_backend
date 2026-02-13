@@ -57,7 +57,7 @@ import sys
 # Export logic (appended)
 if 'result' in locals():
     try:
-        cq.exporters.export(result, '{output_path}')
+        cq.exporters.export(result, '{output_path}, exportType='{output_format.upper()}')
         print(f"Exported to {{'{output_path}'}}")
     except Exception as e:
         print(f"Export failed: {{e}}", file=sys.stderr)
