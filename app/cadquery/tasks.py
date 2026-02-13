@@ -55,33 +55,29 @@ import os
 # User script content
 {user_script}
 
-# Export logic (appended)
+# Export logic 
 if 'result' in locals():
     try:
         res = locals()['result']
         out_path = r'{out_path}'
         fmt = '{fmt}'.upper()
         
-        # 1. Routing for GLTF/GLB (Assembly Engine)
+        # 2.6.1 logic: GLTF/GLB requires an Assembly context
         if fmt in ['GLTF', 'GLB']:
             if not isinstance(res, cq.Assembly):
-                # We wrap the Workplane into an Assembly to access the glTF engine
                 res = cq.Assembly(res, name="Part")
+            # Assembly.save handles the GLTF tessellation internally
             res.save(out_path, exportType=fmt)
-            
-        # 2. Routing for standard CAD formats
         else:
+            # STL/STEP can be handled by standard exporters or Assembly
             if isinstance(res, cq.Assembly):
-                # Assemblies can also save STEP/STL
                 res.save(out_path, exportType=fmt)
             else:
-                # Direct export for Workplanes
                 cq.exporters.export(res, out_path, exportType=fmt)
             
         if os.path.exists(out_path):
             print(f"Successfully exported to {{out_path}}")
         else:
-            print(f"File creation failed for {{out_path}}", file=sys.stderr)
             sys.exit(1)
             
     except Exception as e:
