@@ -19,7 +19,7 @@ from typing import Literal
 
 class GenerateRequest(BaseModel):
     script: str
-    format: Literal["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG", "GLTF"] = "STL"
+    format: Literal["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG", "GLTF", "GLB"] = "STL"
 
 @router.post("/generate")
 async def generate_cad_model(
