@@ -2,4 +2,3 @@ fastapi==0.115.8
 uvicorn[standard]==0.30.6
 cadquery; python_version < "3.13"
 cadquery-ocp; python_version < "3.13"
-

@@ -13,6 +13,8 @@ python-jose[cryptography]==3.3.0
 typer
 greenlet
 google-genai
+cadquery
+casadi
 
 #tests
 pytest 
