@@ -50,6 +50,7 @@ def generate_cad(task_id: str, script_content: str, output_format: str = "STL"):
     wrapper_template = """
 import cadquery as cq
 import sys
+import os
 
 # User script content
 {user_script}
@@ -58,17 +59,34 @@ import sys
 if 'result' in locals():
     try:
         res = locals()['result']
-        # Check if we are dealing with an Assembly or a standard Workplane/Shape
-        if isinstance(res, cq.Assembly):
-            # Assemblies use .save() for glTF/STEP
-            res.save('{out_path}', exportType='{fmt}')
-        else:
-            # Standard parts use exporters.export()
-            cq.exporters.export(res, '{out_path}', exportType='{fmt}')
+        out_path = r'{out_path}'
+        fmt = '{fmt}'.upper()
+        
+        # 1. Routing for GLTF/GLB (Assembly Engine)
+        if fmt in ['GLTF', 'GLB']:
+            if not isinstance(res, cq.Assembly):
+                # We wrap the Workplane into an Assembly to access the glTF engine
+                res = cq.Assembly(res, name="Part")
+            res.save(out_path, exportType=fmt)
             
-        print(f"Successfully exported to {out_path}")
+        # 2. Routing for standard CAD formats
+        else:
+            if isinstance(res, cq.Assembly):
+                # Assemblies can also save STEP/STL
+                res.save(out_path, exportType=fmt)
+            else:
+                # Direct export for Workplanes
+                cq.exporters.export(res, out_path, exportType=fmt)
+            
+        if os.path.exists(out_path):
+            print(f"Successfully exported to {{out_path}}")
+        else:
+            print(f"File creation failed for {{out_path}}", file=sys.stderr)
+            sys.exit(1)
+            
     except Exception as e:
-        print(f"Export failed: {{e}}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 else:
     print("No 'result' variable found in script.", file=sys.stderr)
