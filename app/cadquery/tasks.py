@@ -47,18 +47,26 @@ def generate_cad(task_id: str, script_content: str, output_format: str = "STL"):
     # Let's try to append a standard export if it's not present, 
     # OR better: run it and look for a specific variable name like `result`.
     
-    wrapper_code = f"""
+    wrapper_template = """
 import cadquery as cq
 import sys
 
 # User script content
-{script_content}
+{user_script}
 
 # Export logic (appended)
 if 'result' in locals():
     try:
-        cq.exporters.export(result, '{output_path}', exportType='{output_format.upper()}')
-        print(f"Exported to {{'{output_path}'}}")
+        res = locals()['result']
+        # Check if we are dealing with an Assembly or a standard Workplane/Shape
+        if isinstance(res, cq.Assembly):
+            # Assemblies use .save() for glTF/STEP
+            res.save('{out_path}', exportType='{fmt}')
+        else:
+            # Standard parts use exporters.export()
+            cq.exporters.export(res, '{out_path}', exportType='{fmt}')
+            
+        print(f"Successfully exported to {out_path}")
     except Exception as e:
         print(f"Export failed: {{e}}", file=sys.stderr)
         sys.exit(1)
@@ -66,6 +74,12 @@ else:
     print("No 'result' variable found in script.", file=sys.stderr)
     sys.exit(1)
 """
+
+    wrapper_code = wrapper_template.format(
+        user_script=script_content,
+        out_path=output_path,
+        fmt=output_format.upper()
+    )
     
     with open(script_path, "w") as f:
         f.write(wrapper_code)
