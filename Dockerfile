@@ -1,5 +1,5 @@
 # --------- Builder Stage ---------
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 # Set environment variables for uv
 ENV UV_COMPILE_BYTECODE=1
@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY . /app
 
 # --------- Final Stage ---------
-FROM python:3.11-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 # Install system dependencies required for CadQuery/OCP
 RUN apt-get update && apt-get install -y --no-install-recommends \

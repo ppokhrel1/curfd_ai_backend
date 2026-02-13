@@ -50,8 +50,6 @@ def generate_cad(task_id: str, script_content: str, output_format: str = "STL"):
     wrapper_template = """
 import cadquery as cq
 import sys
-import os
-from cadquery.occ_impl.exporters import export_gltf
 
 # User script content
 {user_script}
@@ -60,30 +58,17 @@ from cadquery.occ_impl.exporters import export_gltf
 if 'result' in locals():
     try:
         res = locals()['result']
-        out_path = r'{out_path}'
-        fmt = '{fmt}'.upper()
-        
+        # Check if we are dealing with an Assembly or a standard Workplane/Shape
         if isinstance(res, cq.Assembly):
-            # Assemblies have built-in glTF support via save()
-            res.save(out_path, exportType=fmt)
+            # Assemblies use .save() for glTF/STEP
+            res.save('{out_path}', exportType='{fmt}')
         else:
-            # Standard Workplane/Shape objects
-            if fmt in ['GLTF', 'GLB']:
-                # Tolerance 0.1 is a good balance between file size and smoothness
-                export_gltf(res, out_path, tolerance=0.1, angularTolerance=0.1)
-            else:
-                cq.exporters.export(res, out_path, exportType=fmt)
+            # Standard parts use exporters.export()
+            cq.exporters.export(res, '{out_path}', exportType='{fmt}')
             
-        if os.path.exists(out_path):
-            print(f"Successfully exported to {{out_path}}")
-        else:
-            print(f"Export finished but file not found at {{out_path}}", file=sys.stderr)
-            sys.exit(1)
-            
+        print(f"Successfully exported to {out_path}")
     except Exception as e:
-        import traceback
         print(f"Export failed: {{e}}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 else:
     print("No 'result' variable found in script.", file=sys.stderr)
