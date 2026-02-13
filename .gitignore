@@ -8,3 +8,5 @@ venv/
 .venv_ws/
 hello.txt
 .gemini
+generated_files_test/
+generated_files/

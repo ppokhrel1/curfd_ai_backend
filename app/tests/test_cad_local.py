@@ -2,7 +2,6 @@ import asyncio
 import os
 import sys
 import logging
-from unittest.mock import MagicMock, patch
 from app.core.task_manager import task_manager
 from app.cadquery.tasks import generate_cad, GENERATED_FILES_DIR
 
@@ -10,74 +9,104 @@ from app.cadquery.tasks import generate_cad, GENERATED_FILES_DIR
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def test_cad_generation():
-    print("Testing CAD generation task (with MOCKS)...")
-    
-    # Simple valid CadQuery script
-    script = """
-import cadquery as cq
-result = cq.Workplane("XY").box(10, 10, 10)
-"""
-    
-    # We need to mock subprocess.run in app.cadquery.tasks
-    # We also need to simulate the file creation that the script would do.
-    
-    with patch('app.cadquery.tasks.subprocess.run') as mock_run:
-        # Define side effect to create the output file
-        def side_effect(*args, **kwargs):
-            # Extract task_id from the script path in args[0][1]
-            # cmd is [sys.executable, script_path]
-            cmd = args[0]
-            script_path = cmd[1]
-            filename = os.path.basename(script_path)
-            task_id = filename.replace('.py', '')
-            output_filename = f"{task_id}.stl"
-            
-            # Create dummy output file
-            output_path = os.path.join(GENERATED_FILES_DIR, output_filename)
-            with open(output_path, 'w') as f:
-                f.write("dummy stl content")
-                
-            return MagicMock(stdout="Mocked execution success", returncode=0)
+# List of formats to test
+FORMATS = ["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG", "GLTF"]
 
-        mock_run.side_effect = side_effect
+async def test_cad_generation_samples():
+    print("Testing CAD generation with sample files and all formats (REAL GENERATION)...")
+    
+    # Path to sample files directory
+    # If running from app root, it should be app/sample_files
+    # But let's check relative to this script just in case or use absolute path if needed
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Assuming this script is in app/tests/, base_dir is app/
+    # But we want project root usually.
+    # Let's try project root first.
+    project_root = os.getcwd()
+    sample_dir = os.path.join(project_root, "app", "sample_files")
+    
+    if not os.path.exists(sample_dir):
+        print(f"Sample files directory '{sample_dir}' not found. Trying local 'sample_files'...")
+        sample_dir = "sample_files"
+        if not os.path.exists(sample_dir):
+             print(f"Sample files directory '{sample_dir}' not found.")
+             return
 
-        # Submit task
-        task_id = task_manager.submit_task(generate_cad, script, "STL")
-        print(f"Task submitted with ID: {task_id}")
-        
-        # Poll for completion
-        for _ in range(20): # Wait up to 20 seconds
-            status = task_manager.get_task_status(task_id)
-            print(f"Task status: {status['status']}")
+    print(f"Scanning for scripts in: {sample_dir}")
+
+    # Find sample scripts recursively
+    sample_scripts = []
+    for root, dirs, files in os.walk(sample_dir):
+        for file in files:
+            if file.endswith('.py'):
+                sample_scripts.append(os.path.join(root, file))
+
+    if not sample_scripts:
+        print(f"No python scripts found in '{sample_dir}'.")
+        return
+
+    # Open log.txt for appending
+    log_file_path = "log.txt"
+    
+    with open(log_file_path, "a") as log_file:
+        log_file.write(f"\n--- Test Run: {len(sample_scripts)} scripts x {len(FORMATS)} formats ---\n")
+        log_file.write(f"GENERATED_FILES_DIR: {GENERATED_FILES_DIR}\n")
+
+        for script_path in sample_scripts:
+            script_name = os.path.basename(script_path)
+            rel_path = os.path.relpath(script_path, sample_dir)
             
-            if status['status'] == 'SUCCESS':
-                print(f"Task completed successfully! Result: {status['result']}")
-                
-                # Verify file exists
-                output_file = os.path.join(GENERATED_FILES_DIR, status['result'])
-                
-                if os.path.exists(output_file):
-                    print(f"File {output_file} exists.")
-                else:
-                     print(f"File {output_file} DOES NOT exist.")
-                     
-                return
-            elif status['status'] == 'FAILURE':
-                print(f"Task failed with error: {status['error']}")
-                return
-                
-            await asyncio.sleep(1)
+            with open(script_path, 'r') as f:
+                script_content = f.read()
+
+            print(f"Processing script: {rel_path} ({script_name})")
             
-        print("Task timed out.")
+            for fmt in FORMATS:
+                print(f"  Format: {fmt} ...", end=" ", flush=True)
+                
+                # To execute DIFFERENT variations, we could modify the script content?
+                # The prompt said "Generate different variations for different files".
+                # Maybe just generating different formats IS the variation.
+                # Or maybe modify parameters if possible? 
+                # For now, let's stick to generating different formats from the same script.
+                
+                try:
+                    task_id = task_manager.submit_task(generate_cad, script_content, fmt)
+                    
+                    # Poll for completion
+                    success = False
+                    result_file = None
+                    # Wait longer for real generation (e.g., 30 seconds)
+                    for _ in range(60): 
+                        status = task_manager.get_task_status(task_id)
+                        if status['status'] == 'SUCCESS':
+                            result_file = status['result']
+                            success = True
+                            break
+                        elif status['status'] == 'FAILURE':
+                            print(f"FAILED: {status['error']}")
+                            log_file.write(f"Script: {rel_path} | Format: {fmt} | Status: FAILURE | Error: {status['error']}\n")
+                            break
+                        await asyncio.sleep(0.5)
+                    
+                    if success:
+                        print(f"SUCCESS -> {result_file}")
+                        full_path = os.path.join(GENERATED_FILES_DIR, result_file)
+                        log_file.write(f"Script: {rel_path} | Format: {fmt} | Generated: {full_path}\n")
+                    elif not result_file and status['status'] != 'FAILURE':
+                        print("TIMEOUT")
+                        log_file.write(f"Script: {rel_path} | Format: {fmt} | Status: TIMEOUT\n")
+
+                except Exception as e:
+                    print(f"ERROR submitting: {e}")
+                    log_file.write(f"Script: {rel_path} | Format: {fmt} | Status: EXCEPTION | Error: {e}\n")
 
 if __name__ == "__main__":
-    # Ensure generated files directory exists
+    # Ensure generated files directory exists for test environment
     if not os.path.exists(GENERATED_FILES_DIR):
         try:
              os.makedirs(GENERATED_FILES_DIR)
         except OSError:
-             # If permission denied (e.g. /app), use local dir and monkeypatch
              local_dir = "./generated_files_test"
              if not os.path.exists(local_dir):
                  os.makedirs(local_dir)
@@ -86,4 +115,4 @@ if __name__ == "__main__":
              app.cadquery.tasks.GENERATED_FILES_DIR = local_dir
              GENERATED_FILES_DIR = local_dir
              
-    asyncio.run(test_cad_generation())
+    asyncio.run(test_cad_generation_samples())

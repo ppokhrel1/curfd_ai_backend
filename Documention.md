@@ -7,7 +7,7 @@ FastAPI backend for session management, chat records, and a 3D generation pipeli
 - **User Inputs**: Session + Chat + Messages
 - **LLM / Orchestrator**: Job creation and spec normalization
 - **RAG / Vector DB**: Placeholder for retrieval services (future integration)
-- **3D Generator / QA / Exporter**: Job lifecycle and asset registration
+- **3D Generator / QA / Exporter**: Job lifecycle and asset registration. **Now uses an in-memory Task Manager instead of Celery/Redis for simplified deployment.**
 - **Object Storage / Metadata DB**: Asset records and metadata storage
 
 ## Core Entities
@@ -16,7 +16,7 @@ FastAPI backend for session management, chat records, and a 3D generation pipeli
 - **Chat**: Conversation container under a session
 - **Message**: Individual chat messages
 - **Job**: 3D generation workflow entry
-- **Asset**: Output artifact (STL/GLB/images)
+- **Asset**: Output artifact (STL/GLB/GLTF/STEP/etc.)
 
 ## API Overview
 Base URL: `http://localhost:8000/api/v1`
@@ -351,10 +351,11 @@ curl -X DELETE http://localhost:8000/api/v1/asset-meta/<meta_id> \\
 
 ### CadQuery
 - `POST /cadquery/generate`
+Supported formats: `STL`, `STEP`, `AMF`, `3MF`, `TJS`, `VRML`, `VTP`, `DXF`, `SVG`, `GLTF`.
 ```bash
-curl -X POST http://localhost:8000/api/v1/cadquery/generate \\
-  -H "Content-Type: application/json" \\
-  -d '{"script":"import cadquery as cq; result = cq.Workplane(\"XY\").box(10, 10, 10)","format":"STL"}'
+curl -X POST http://localhost:8000/api/v1/cadquery/generate \
+  -H "Content-Type: application/json" \
+  -d '{"script":"import cadquery as cq; result = cq.Workplane(\"XY\").box(10, 10, 10)","format":"STEP"}'
 ```
 Response:
 ```json
@@ -362,9 +363,9 @@ Response:
 ```
 - `POST /cadquery/upload`
 ```bash
-curl -X POST http://localhost:8000/api/v1/cadquery/upload \\
-     -F "file=@/path/to/script.py" \\
-     -F "output_format=STL"
+curl -X POST http://localhost:8000/api/v1/cadquery/upload \
+     -F "file=@/path/to/script.py" \
+     -F "output_format=GLTF"
 ```
 Response:
 ```json
@@ -396,5 +397,21 @@ Example usage:
 from app.services.supabase import supabase_anon
 
 if supabase_anon:
-    resp = supabase_anon.request(\"GET\", \"/rest/v1/some_table\", params={\"select\": \"*\"})
+    resp = supabase_anon.request("GET", "/rest/v1/some_table", params={"select": "*"})
 ```
+
+## Testing
+
+To run the local verification tests for the CadQuery integration (which uses mocks for the actual generation process), use the following command from the project root:
+
+```bash
+# Set PYTHONPATH to include the current directory so 'app' module starts from here
+PYTHONPATH=. python app/tests/test_cad_local.py
+```
+OR
+```bash
+# Run as a module
+python -m app.tests.test_cad_local
+```
+
+This ensures the `app` module is correctly resolved.

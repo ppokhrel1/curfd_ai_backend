@@ -19,7 +19,7 @@ from typing import Literal
 
 class GenerateRequest(BaseModel):
     script: str
-    format: Literal["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG"] = "STL"
+    format: Literal["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG", "GLTF"] = "STL"
 
 @router.post("/generate")
 async def generate_cad_model(
@@ -49,7 +49,7 @@ async def generate_cad_model(
 @router.post("/upload")
 async def upload_cad_script(
     file: UploadFile = File(...),
-    output_format: Literal["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG"] = Form("STL"),
+    output_format: Literal["STL", "STEP", "AMF", "3MF", "TJS", "VRML", "VTP", "DXF", "SVG", "GLTF"] = Form("STL"),
     # redis: Redis = Depends(get_redis)
 ):
     """
