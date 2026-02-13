@@ -7,7 +7,10 @@ if not settings.database_url:
 engine = create_async_engine(
     settings.database_url, 
     pool_pre_ping=True, 
-    future=True
+    future=True,
+    connect_args={
+        "prepare_threshold": None    # ← Disable prepared statement caching
+    },
 )
 
 SessionLocal = async_sessionmaker(

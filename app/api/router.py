@@ -6,6 +6,7 @@ from app.api.routes import (
     auth,
     chat_stream,
     chats,
+    gemini_routes,
     health,
     jobs,
     messages,
@@ -24,4 +25,5 @@ api_router.include_router(chat_stream.router, tags=["chat-stream"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(assets.router, prefix="/assets", tags=["assets"])
 api_router.include_router(asset_meta.router, prefix="/asset-meta", tags=["asset-meta"])
+api_router.include_router(gemini_routes.router, prefix="/gemini", tags=["gemini"])
 api_router.include_router(cadquery.router, prefix="/cadquery", tags=["cadquery"])

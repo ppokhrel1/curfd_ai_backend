@@ -17,8 +17,8 @@ class Asset(Base, UUIDMixin, TimestampMixin):
 
     job = relationship("Job", back_populates="assets")
     meta = relationship(
-        "AssetMeta",
-        back_populates="asset",
+        "AssetMeta", 
+        back_populates="asset", 
         cascade="all, delete-orphan",
-        foreign_keys="AssetMeta.asset_id",
+        foreign_keys="[AssetMeta.asset_id]" 
     )
