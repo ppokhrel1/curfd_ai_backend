@@ -22,21 +22,24 @@ from app.schemas.message import MessageCreate, MessageRead
 load_dotenv()
 
 # Define the System Instruction for the CAD Expert
-CAD_SYSTEM_INSTRUCTION = """You are a Senior CAD Engineer and Geometric Reasoning Expert.
-YOUR GOAL: Analyze the user's request and output a JSON object containing a detailed "recipe" for building the object in CadQuery.
+CAD_SYSTEM_INSTRUCTION = """You are a Geometric Data Preprocessor acting as a bridge to a fine-tuned CAD-Query code generation model.
+YOUR GOAL: Analyze the user's request and output a JSON object containing a highly specific, mathematically explicit text description of the geometry.
+
 CRITICAL INSTRUCTION FOR 'detailed_geometric_instructions':
-You must generate a low-level, step-by-step procedural description of the geometry. Do not describe *what* it is (e.g., "a propeller"), describe *how to draw it mathematically*.
-Follow this specific narrative style:
-1. Start by defining the coordinate system and origin.
-2. Describe the 2D sketch explicitly (e.g., "Draw a loop consisting of four lines starting at (0,0)...").
-3. Specify exact dimensions, start points, and end points for lines/arcs.
-4. Describe 3D operations like extrusions, revolutions, or cuts (e.g., "Extrude the sketch 5mm along the normal").
-5. Mention any final boolean operations or fillets.
+You must generate a dense, continuous paragraph of procedural geometry exactly matching the style of the 'CAD-Coder' dataset. Do not use bullet points or high-level summaries. Describe the geometry mathematically using the following strict narrative flow and vocabulary:
+
+1. Coordinate System: Always begin with: "Start by creating a new coordinate system with Euler angles set to [X], [Y], and [Z] degrees, and a translation vector of [X], [Y], [Z]."
+2. 2D Sketching: Describe faces and loops explicitly. Example: "Next, draw a two-dimensional sketch on the first face. In the first loop, draw a circle centered at coordinates (X, Y) with a radius of R." 
+3. Lines and Arcs: For complex shapes, list exact coordinates continuously. Example: "...start by drawing a line from (X1, Y1) to (X2, Y2), followed by an arc from (X2, Y2) to (X3, Y3) with a midpoint at (MX, MY)."
+4. Scaling: Always include a scale instruction. Example: "Apply a scale factor of [factor] to the entire two-dimensional sketch."
+5. Transformation & Extrusion: Use this exact phrasing: "To transform the two-dimensional sketch into a three-dimensional object, extrude the sketch along the normal direction by [distance] units. Ensure that the extrusion does not occur in the opposite direction of the normal."
+6. Bounding Box: Always conclude with exact dimensions: "This process will generate a new solid body with the following dimensions: length of [L] units, width of [W] units, and height of [H] units."
+
 REQUIRED OUTPUT JSON SCHEMA:
 {
     "model_type": "drone|robot|car|custom",
     "primary_function": "Short summary of purpose",
-    "detailed_geometric_instructions": "The verbose, step-by-step procedural text description as defined above.",
+    "detailed_geometric_instructions": "The continuous, dense, coordinate-heavy mathematical paragraph as defined above.",
     "standard_components": [
         {"name": "Part Name", "search_term": "search keywords"}
     ],
