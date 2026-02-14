@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import time
 from datetime import datetime, timezone
 from typing import Any, TypedDict
+import zipfile
 
+import aiohttp
 from fastapi import (
     APIRouter,
     Depends,
@@ -129,7 +132,57 @@ def _extract_runpod_asset_data(output: Any) -> dict[str, Any] | None:
     )
     return None
 
+async def _download_and_extract_scad(download_url: str) -> str | None:
+    """Downloads the zip from B2 and extracts the first .py file content."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(download_url) as response:
+                if response.status != 200:
+                    return None
+                
+                content = await response.read()
+                
+                # Use io.BytesIO to treat the raw bytes as a file for zipfile
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    scad_files = [f for f in z.namelist() if f.endswith('.py')]
+                    if not scad_files:
+                        return None
+                    
+                    # Read and decode the first SCAD file found
+                    with z.open(scad_files[0]) as f:
+                        return f.read().decode('utf-8')
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to extract SCAD: {e}")
+        return None
 
+async def _download_and_extract_scad(download_url: str) -> str | None:
+    """Downloads the zip and extracts the content of assembly.py."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(download_url) as response:
+                if response.status != 200:
+                    return None
+                
+                content = await response.read()
+                
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    # Look specifically for assembly.py
+                    target_file = "assembly.py"
+                    if target_file not in z.namelist():
+                        # Fallback: check if it's nested (e.g., 'folder/assembly.py')
+                        matches = [f for f in z.namelist() if f.endswith('assembly.py')]
+                        if not matches:
+                            return None
+                        target_file = matches[0]
+                    
+                    with z.open(target_file) as f:
+                        return f.read().decode('utf-8')
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to extract assembly.py: {e}")
+        return None
+    
 async def _persist_generate_scad_asset(
     *,
     db: AsyncSession,
@@ -168,7 +221,6 @@ async def _persist_generate_scad_asset(
         logger.error(f"Chat not found: {chat_id}")
         return None
     
-    # FIX: Capture the session_id immediately. 
     # Any 'await db.commit()' below will expire the 'chat' instance, 
     # making chat.session_id inaccessible without a re-fetch.
     current_session_id = chat.session_id
@@ -202,6 +254,7 @@ async def _persist_generate_scad_asset(
         logger.info(f"Created job with id: {resolved_job.id}")
 
     logger.info(f"Creating asset for job_id: {resolved_job.id}")
+    scad_file = await _download_and_extract_scad(download_url)
     asset = AssetModel(
         job_id=resolved_job.id,
         asset_type=asset_type or "scad_zip",
@@ -210,9 +263,9 @@ async def _persist_generate_scad_asset(
         metadata_json={
             "runpod_id": runpod_id,
             "file_id": data.get("file_id"),
+            "scadCode": scad_file,
             "filename": data.get("filename"),
             "download_url": download_url,
-            "requirements_json": requirements_json,
         },
     )
     db.add(asset)
