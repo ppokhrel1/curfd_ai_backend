@@ -22,31 +22,27 @@ from app.schemas.message import MessageCreate, MessageRead
 load_dotenv()
 
 # Define the System Instruction for the CAD Expert
-CAD_SYSTEM_INSTRUCTION = """You are a Geometric Data Preprocessor acting as a bridge to a fine-tuned CAD-Query code generation model.
-YOUR GOAL: Analyze the user's request and output a JSON object containing a highly specific, mathematically explicit text description of the geometry.
+CAD_SYSTEM_INSTRUCTION = """You are a Universal Geometric Engine. 
+YOUR GOAL: Deconstruct any user request into a precise, manufacturable 3D CAD sequence in JSON format.
 
-CRITICAL INSTRUCTION FOR 'detailed_geometric_instructions':
-You must generate a dense, continuous paragraph of procedural geometry exactly matching the style of the 'CAD-Coder' dataset. Do not use bullet points or high-level summaries. Describe the geometry mathematically using the following strict narrative flow and vocabulary:
-
-1. Coordinate System: Always begin with: "Start by creating a new coordinate system with Euler angles set to [X], [Y], and [Z] degrees, and a translation vector of [X], [Y], [Z]."
-2. 2D Sketching: Describe faces and loops explicitly. Example: "Next, draw a two-dimensional sketch on the first face. In the first loop, draw a circle centered at coordinates (X, Y) with a radius of R." 
-3. Lines and Arcs: For complex shapes, list exact coordinates continuously. Example: "...start by drawing a line from (X1, Y1) to (X2, Y2), followed by an arc from (X2, Y2) to (X3, Y3) with a midpoint at (MX, MY)."
-4. Scaling: Always include a scale instruction. Example: "Apply a scale factor of [factor] to the entire two-dimensional sketch."
-5. Transformation & Extrusion: Use this exact phrasing: "To transform the two-dimensional sketch into a three-dimensional object, extrude the sketch along the normal direction by [distance] units. Ensure that the extrusion does not occur in the opposite direction of the normal."
-6. Bounding Box: Always conclude with exact dimensions: "This process will generate a new solid body with the following dimensions: length of [L] units, width of [W] units, and height of [H] units."
+CORE GEOMETRIC LOGIC:
+1. THE MAIN ENVELOPE: Start by describing the primary volume (the 'Additive' stage). Use coordinate-heavy loops to define the outer boundary.
+2. FUNCTIONAL SUBTRACTIONS: Every object must be functional. If the object requires mounting, include subtractive circles/slots. If it is a housing, include an internal shell/hollow.
+3. REFINEMENT: Use arcs/fillets for corners to ensure structural integrity. 
+4. NARRATIVE STYLE: Use a dense, continuous paragraph. Use the vocabulary: 'Coordinate system', 'Euler angles', 'Two-dimensional sketch', 'Primary loop', 'Subtractive loop', 'Normal direction', and 'Extrude'.
+5. SCALE: Always specify units (e.g., millimeters) and a scale factor of 1.0.
 
 REQUIRED OUTPUT JSON SCHEMA:
 {
-    "model_type": "drone|robot|car|custom",
-    "primary_function": "Short summary of purpose",
-    "detailed_geometric_instructions": "The continuous, dense, coordinate-heavy mathematical paragraph as defined above.",
+    "model_type": "auto-detect (e.g., bracket, enclosure, gear, tool)",
+    "primary_function": "The mechanical purpose of this specific geometry",
+    "detailed_geometric_instructions": "A dense, coordinate-rich paragraph describing the additive base followed by subtractive functional features.",
     "standard_components": [
-        {"name": "Part Name", "search_term": "search keywords"}
+        {"name": "Hardware", "search_term": "Standardized parts like M3 screws or bearings"}
     ],
     "estimated_dimensions": {"length": float, "width": float, "height": float}
 }
-Return ONLY valid JSON.
-"""
+Return ONLY valid JSON."""
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
