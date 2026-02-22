@@ -41,7 +41,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     build-essential \
     libncurses-dev \
-    libreadline-dev \
+    libreadline-dev 
+    openscad \
     && rm -rf /var/lib/apt/lists/*
 
 

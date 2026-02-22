@@ -12,6 +12,8 @@ from app.api.routes import (
     messages,
     sessions,
     cadquery,
+    gemini_openscad_generate_route,
+    openscad
 )
 
 api_router = APIRouter()
@@ -27,3 +29,6 @@ api_router.include_router(assets.router, prefix="/assets", tags=["assets"])
 api_router.include_router(asset_meta.router, prefix="/asset-meta", tags=["asset-meta"])
 api_router.include_router(gemini_routes.router, prefix="/gemini", tags=["gemini"])
 api_router.include_router(cadquery.router, prefix="/cadquery", tags=["cadquery"])
+api_router.include_router(gemini_openscad_generate_route.router, prefix="/openscad", tags=["openscad"])
+api_router.include_router(openscad.router, prefix="/openscad-3d", tags=["OpenSCAD-3D"])
+

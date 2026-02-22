@@ -21,6 +21,65 @@ except OSError:
     os.makedirs(GENERATED_FILES_DIR, exist_ok=True)
 
 # @celery_app.task(bind=True)
+def generate_openscad(task_id: str, script_content: str, output_format: str = "STL"):
+    """
+    Generates a 3D model file from the provided OpenSCAD script content.
+    """
+    logger.info(f"Starting OpenSCAD generation for task {task_id}")
+
+    # 1. Create a temporary .scad file for the script
+    script_filename = f"{task_id}.scad"
+    script_path = os.path.join(GENERATED_FILES_DIR, script_filename)
+    
+    output_filename = f"{task_id}.{output_format.lower()}"
+    output_path = os.path.join(GENERATED_FILES_DIR, output_filename)
+
+    # 2. Write the raw OpenSCAD code to the file
+    with open(script_path, "w") as f:
+        f.write(script_content)
+
+    # 3. Execute the script using the openscad CLI
+    # Command format: openscad -o <output_file> <input_file>
+    try:
+        result = subprocess.run(
+            ["openscad", "-o", output_path, script_path], 
+            capture_output=True, 
+            text=True, 
+            cwd=GENERATED_FILES_DIR,
+            check=True
+        )
+        logger.info(f"OpenSCAD execution output: {result.stdout}")
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"OpenSCAD execution failed: {e.stderr}")
+        
+        # OpenSCAD parser errors usually look like:
+        # "ERROR: Parser error in line 14: syntax error"
+        error_info = {"line": None, "message": "OpenSCAD compilation failed."}
+        
+        # Try to extract the last meaningful error line
+        lines = [line.strip() for line in e.stderr.strip().split('\n') if line.strip()]
+        if lines:
+            error_info["message"] = lines[-1]
+            
+        # Try to find the exact line number using regex
+        match = re.search(r'line\s+(\d+)', e.stderr, re.IGNORECASE)
+        if match:
+            error_info["line"] = int(match.group(1))
+            
+        raise RuntimeError(json.dumps(error_info))
+    finally:
+        # Cleanup the .scad script file after compilation if you don't need to keep it
+        # pass
+        pass
+
+    # 4. Verify output
+    if not os.path.exists(output_path):
+         raise RuntimeError("Output file was not created by OpenSCAD.")
+
+    return output_filename
+
+# @celery_app.task(bind=True)
 def generate_cad(task_id: str, script_content: str, output_format: str = "STL"):
     """
     Generates a CAD file from the provided script content.
