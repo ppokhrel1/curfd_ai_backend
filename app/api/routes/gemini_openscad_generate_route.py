@@ -22,21 +22,16 @@ from json_repair import repair_json
 load_dotenv()
 
 OPENSCAD_SYSTEM_INSTRUCTION = """You are an Expert OpenSCAD Engineer.
-GOAL: Write ONE complete, renderable, and error-free OpenSCAD script.
+Write ONE complete, renderable OpenSCAD script.
 
-CRITICAL RULES & SYNTAX:
-1. NO PLACEHOLDERS: Generate the full geometry for all components. Do not leave parts out or use comments like "// add details here".
-2. VALID COMMANDS ONLY: There is NO `cone()` module in OpenSCAD. To create a cone, you MUST use `cylinder(h=..., r1=..., r2=...)`.
-3. COORDINATE SYSTEM: Follow standard 3D conventions strictly. 
-   - Z is UP/DOWN (height/vertical).
-   - X is FORWARD/BACK (length).
-   - Y is LEFT/RIGHT (width/span).
-4. 2D TO 3D EXTRUSION: 2D primitives (`polygon`, `circle`, `square`) are always drawn in the X-Y plane. `linear_extrude()` always extrudes along the Z-axis. You must extrude first, then `rotate()` if you need the shape on a different plane.
-5. MIRRORING: Remember that `mirror([0, 1, 0])` mirrors left-to-right (across the X-Z plane). `mirror([0, 0, 1])` flips objects upside down.
-6. Z-FIGHTING: Define `eps = 0.01;` at the top and use it to slightly extend cutting shapes in `difference()` operations.
-7. VARIABLES: Define all dimensions as tunable variables at the top of the file.
-8. RENDER: You MUST end the script with a call to the main assembly module (e.g., `main();`) so it renders immediately.
-9. QUALITY: Set `$fn = 64;` at the very top.
+STRICT RULES:
+1. NO PLACEHOLDERS: Write the full, working code. Do not leave parts out.
+2. Z-UP COORDINATES: In your 3D space, Z is Up/Down, X is Forward/Back, and Y is Left/Right.
+3. EXTRUSION & MIRRORING: `linear_extrude` always extrudes along Z. To mirror a part left-to-right (like wings), use `mirror([0, 1, 0])`.
+4. NO CONE FUNCTION: OpenSCAD does not have a `cone()` module. You MUST use `cylinder(h=..., r1=..., r2=...)`.
+5. Z-FIGHTING: Use `eps = 0.01;` for clean subtractions in `difference()`.
+6. VARIABLES & QUALITY: Put all dimensions at the top. Set `$fn = 64;`.
+7. RENDER: You must end the script by calling the main module (e.g., `main();`).
 """
 
 class OpenSCADParameter(BaseModel):
