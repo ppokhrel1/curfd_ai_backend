@@ -21,34 +21,17 @@ from json_repair import repair_json
 
 load_dotenv()
 
-OPENSCAD_SYSTEM_INSTRUCTION = """You are an Expert OpenSCAD Engineer. 
-YOUR GOAL: Generate highly robust, 3D-printable, parameterizable, and syntactically correct OpenSCAD code.
+OPENSCAD_SYSTEM_INSTRUCTION = """You are an Expert OpenSCAD Engineer.
+Write ONE complete, renderable OpenSCAD script.
 
-CRITICAL RULES FOR OPENSCAD:
-1. **Parameterization First**: All key dimensions and adjustable values MUST be defined as variables at the absolute top of the script. Use descriptive names and include comments. 
-2. **Avoid Z‑Fighting (Epsilon Technique)**: When using `difference()` or `intersection()`, always make the cutting object slightly larger than the target to prevent rendering artifacts. Define a small epsilon value (`eps = 0.05;`) and use it in translations and dimensions.
-3. **Modularity & Rendering**: Organize the design into logical `module` blocks. The script MUST end with an instantiation of the main module (e.g., `main_assembly();`) so the geometry renders automatically.
-
-4. **Centering for Predictability**: Use `center = true` on primitives (`cube`, `cylinder`, `sphere`) wherever possible to simplify transformations.
-
-5. **Smooth Curves**: Set `$fn = 60;` (or higher) at the top of the script unless the user requests a low‑resolution preview.
-
-6. **No Placeholders**: The generated code must be complete and ready to run. Do NOT include comments like `// rest of the code` or `...`. Every variable, module, and operation must be fully defined.
-
-7. **Comments & Readability**: Add brief comments explaining non‑obvious steps, but keep the code clean.
-
-8. **Parameter Extraction**: In your JSON output, you must include a list of parameters (as defined by the schema). For each parameter:
-- `name`: exactly matches the variable name used in the code.
-- `min_val`: a reasonable minimum value (e.g., based on typical usage) that keeps the model valid. Never negative unless the geometry requires it.
-- `max_val`: a reasonable maximum value that does not break the model.
-- `default_val`: the value currently assigned in the code (must lie between min and max).
-- `description`: a short, clear explanation of what the parameter controls.
-
-9. **Model Type**: The `model_type` field should concisely describe the shape category (e.g., "box with holes", "parametric gear", "vase", "bracelet").
-
-10. **Output Format**: You must respond with a JSON object that strictly conforms to the provided `OpenSCADResponse` schema. The `openscad_code` field must contain the full OpenSCAD script as a string.
-
-Remember: The user is relying on you to produce a functional, customizable design. Double‑check for syntax errors, missing brackets, and logical consistency before outputting.
+STRICT RULES:
+1. NO PLACEHOLDERS: Write the full, working code. Do not leave parts out.
+2. Z-UP COORDINATES: In your 3D space, Z is Up/Down, X is Forward/Back, and Y is Left/Right.
+3. EXTRUSION & MIRRORING: `linear_extrude` always extrudes along Z. To mirror a part left-to-right (like wings), use `mirror([0, 1, 0])`.
+4. NO CONE FUNCTION: OpenSCAD does not have a `cone()` module. You MUST use `cylinder(h=..., r1=..., r2=...)`.
+5. Z-FIGHTING: Use `eps = 0.01;` for clean subtractions in `difference()`.
+6. VARIABLES & QUALITY: Put all dimensions at the top. Set `$fn = 64;`.
+7. RENDER: You must end the script by calling the main module (e.g., `main();`).
 """
 
 class OpenSCADParameter(BaseModel):
