@@ -10,6 +10,7 @@ from app.api.routes import (
     health,
     jobs,
     messages,
+    scad_genetic_algo,
     sessions,
     cadquery,
     gemini_openscad_generate_route,
@@ -31,4 +32,5 @@ api_router.include_router(gemini_routes.router, prefix="/gemini", tags=["gemini"
 api_router.include_router(cadquery.router, prefix="/cadquery", tags=["cadquery"])
 api_router.include_router(gemini_openscad_generate_route.router, prefix="/openscad", tags=["openscad"])
 api_router.include_router(openscad.router, prefix="/openscad-3d", tags=["OpenSCAD-3D"])
+api_router.include_router(scad_genetic_algo.router, prefix="/scad-genetic-algo", tags=["scad-genetic-algo"])
 

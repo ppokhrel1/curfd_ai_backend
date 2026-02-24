@@ -15,6 +15,7 @@ greenlet
 google-genai
 cadquery
 casadi
+celery
 
 #tests
 pytest 

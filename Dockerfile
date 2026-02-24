@@ -42,9 +42,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libncurses-dev \
     libreadline-dev \
-    openscad \
+    openscad curl jq \
     && rm -rf /var/lib/apt/lists/*
-
 
 # Create a non-root user for security
 # Using fixed GID and UID for consistency
@@ -64,6 +63,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Create generated files directory and set ownership
 RUN mkdir -p /app/generated_files && chown -R app:app /app/generated_files
+
 
 # Switch to the non-root user and set the working directory
 USER app

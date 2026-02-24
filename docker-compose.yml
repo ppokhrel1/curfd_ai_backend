@@ -5,7 +5,8 @@ services:
       dockerfile: Dockerfile
     restart: always
     # -------- replace with comment to run with gunicorn --------
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: /bin/bash /code/entrypoint.sh
     # command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
     env_file:
       - ./.env
@@ -20,6 +21,22 @@ services:
       - ./app:/code/app
       - ./.env:/code/.env
       - generated-files:/app/generated_files
+      - ./entrypoint.sh:/code/entrypoint.sh
+    depends_on:
+      - ngrok
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: always
+    command:
+      - "http"
+      - "web:8000" # Tunnels traffic to the 'web' service container on port 8000
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN} # Get this from ngrok.com dashboard
+    ports:
+      - "4040:4040" # Local dashboard to see the public URL
+    depends_on:
+      - web
 
   # worker:
   #   build:

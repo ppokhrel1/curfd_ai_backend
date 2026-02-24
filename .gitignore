@@ -14,3 +14,5 @@ hello.txt
 .gemini
 generated_files_test/
 generated_files/
+*.stl
+**/*.stl
