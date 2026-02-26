@@ -44,7 +44,7 @@ uvicorn app.main:app --reload
 `/api/v1`
 
 ## Development Notes
-- Postgres DB: `postgresql+psycopg://curfd:curfd@localhost:5432/curfd_ai`
+- Postgres DB: `postgresql+asyncpg://curfd:curfd@localhost:5432/curfd_ai`
 - Supabase DB: set `SUPABASE_DB_URL` in `.env` to override
 - Supabase CLI: `python -m app.cli supabase-get /rest/v1/users --param select=*`
 - Supabase API: set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` if you want to call Supabase APIs

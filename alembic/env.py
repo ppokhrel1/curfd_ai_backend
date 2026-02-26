@@ -15,7 +15,11 @@ from app.db.base import Base
 import app.models  # noqa: F401
 
 config = context.config
-db_url = settings.database_url.replace("%", "%%") if settings.database_url else ""
+# Alembic uses engine_from_config which needs a *synchronous* driver.
+# The app uses asyncpg; swap it for psycopg (v3 sync) when running migrations.
+db_url = settings.database_url or ""
+db_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+db_url = db_url.replace("%", "%%")
 config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:

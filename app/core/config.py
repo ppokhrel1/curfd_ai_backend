@@ -66,7 +66,7 @@ if settings.supabase_db_url:
 
 if not settings.database_url:
     settings.database_url = (
-        "postgresql+psycopg://"
+        "postgresql+asyncpg://"
         f"{settings.postgres_user}:{settings.postgres_password}"
         f"@{settings.postgres_host}:{settings.postgres_port}"
         f"/{settings.postgres_db}"

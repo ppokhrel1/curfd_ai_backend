@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
+    assembly,
     asset_meta,
     assets,
     auth,
@@ -11,6 +12,7 @@ from app.api.routes import (
     jobs,
     messages,
     scad_genetic_algo,
+    scad_versions,
     sessions,
     cadquery,
     gemini_openscad_generate_route,
@@ -33,4 +35,6 @@ api_router.include_router(cadquery.router, prefix="/cadquery", tags=["cadquery"]
 api_router.include_router(gemini_openscad_generate_route.router, prefix="/openscad", tags=["openscad"])
 api_router.include_router(openscad.router, prefix="/openscad-3d", tags=["OpenSCAD-3D"])
 api_router.include_router(scad_genetic_algo.router, prefix="/scad-genetic-algo", tags=["scad-genetic-algo"])
+api_router.include_router(scad_versions.router, prefix="/scad-versions", tags=["scad-versions"])
+api_router.include_router(assembly.router, tags=["assembly"])
 

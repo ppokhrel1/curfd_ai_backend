@@ -1,10 +1,13 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
+import logging
 import os
 import json
 import asyncio
 from typing import Literal
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # Import your custom task manager
 from app.core.task_manager import task_manager
@@ -16,8 +19,8 @@ router = APIRouter()
 
 class OpenScadGenerateRequest(BaseModel):
     script: str
-    # OpenSCAD supported export formats
-    format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG"] = "STL"
+    # OpenSCAD supported export formats; GLB triggers multi-part ZIP compilation
+    format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG", "GLB"] = "STL"
 
 @router.post("/generate")
 async def generate_openscad_model(request: OpenScadGenerateRequest):
@@ -32,7 +35,7 @@ async def generate_openscad_model(request: OpenScadGenerateRequest):
 @router.post("/upload")
 async def upload_openscad_script(
     file: UploadFile = File(...),
-    output_format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG"] = Form("STL"),
+    output_format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG", "GLB"] = Form("STL"),
 ):
     """
     Upload an OpenSCAD (.scad) script file for generation.
@@ -96,14 +99,22 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
         print(f"Client disconnected for OpenSCAD task {task_id}")
 
 @router.get("/download/{filename}")
-async def download_file(filename: str):
+async def download_file(filename: str, background_tasks: BackgroundTasks):
     """
-    Download a generated OpenSCAD output file.
+    Download a generated OpenSCAD output file and delete it afterward.
     """
-    # Ensure this matches the GENERATED_FILES_DIR from your tasks.py
     file_path = os.path.join(os.getenv("GENERATED_FILES_DIR", "/app/generated_files"), filename)
-    
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    
+
+    def _cleanup(path: str):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"Deleted served file: {path}")
+        except OSError as e:
+            logger.warning(f"Could not delete served file {path}: {e}")
+
+    background_tasks.add_task(_cleanup, file_path)
     return FileResponse(file_path, filename=filename)

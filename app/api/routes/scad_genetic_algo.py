@@ -112,7 +112,7 @@ async def worker_webhook(job_id: str, payload: WorkerWebhookPayload, db: AsyncSe
     job.status = payload.status
     job.finished_at = datetime.now(timezone.utc)
     
-    if payload.status == "Completed":
+    if payload.status.startswith("Completed"):
         job.optimized_parameters = payload.optimized_parameters
         job.fitness_score = payload.fitness_score
         job.result_url = payload.result_url
@@ -121,6 +121,22 @@ async def worker_webhook(job_id: str, payload: WorkerWebhookPayload, db: AsyncSe
 
     await db.commit()
     return {"status": "success"}
+
+@router.get("/list/{chat_id}", response_model=list[ScadJobRead])
+async def list_optimization_jobs(
+    chat_id: str,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id_async)
+):
+    """Return all optimization jobs for a given chat, newest first."""
+    stmt = (
+        select(ScadJob)
+        .where(ScadJob.chat_id == chat_id)
+        .order_by(ScadJob.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
 
 @router.get("/stream/{job_id}")
 async def stream_optimization_status(job_id: str, token: str, db: AsyncSession = Depends(get_db)):
@@ -149,8 +165,8 @@ async def stream_optimization_status(job_id: str, token: str, db: AsyncSession =
                 last_status = job.status
                 print(f"Emitted update for job {job_id}: {payload}")
 
-            if job.status in ["Completed", "Failed"]:
-                break
+            if job.status.startswith("Completed") or job.status == "Failed":
+                break   
             
             await asyncio.sleep(1.5)
 

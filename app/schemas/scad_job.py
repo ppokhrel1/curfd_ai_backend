@@ -23,7 +23,7 @@ class ScadJob(Base):
     error = Column(String, nullable=True)
     
     # Timestamps
-    started_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, nullable=True)
-    finished_at = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)

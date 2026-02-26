@@ -4,50 +4,38 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
 
-# Adjust imports to match your project structure
 from app.main import app
 from app.db.session import get_db
 from app.core.deps import get_current_user_id_async
 from app.models.chat import Chat
 from app.models.session import Session as UserSession
+from app.api.routes.gemini_openscad_generate_route import OpenSCADResponse, OpenSCADParameter
 
-# --- CONFIGURATION ---
-ENDPOINT_URL = "/api/v1/gemini/process_requirements"
+ENDPOINT_URL = "/api/v1/openscad/process_requirements"
 
 MOCK_CHAT_ID = "chat-123"
 MOCK_USER_ID = "user-456"
 VALID_PAYLOAD = {
     "chat_id": MOCK_CHAT_ID,
-    "content": "Build a drone frame",
+    "content": "Build a simple cube",
     "role": "user"
 }
-VALID_GEMINI_RESPONSE = json.dumps({
-    "model_type": "drone",
-    "primary_function": "Aerial surveillance",
-    "detailed_geometric_instructions": "Draw a circle...",
-    "standard_components": [],
-    "estimated_dimensions": {"length": 10.0, "width": 10.0, "height": 5.0}
-})
 
 @pytest.fixture
 def mock_db_session():
     """Creates a fake AsyncSession that mocks all DB methods."""
     session = AsyncMock()
-
     mock_result = MagicMock()
     session.execute.return_value = mock_result
-
     session.add = MagicMock()
     session.commit = AsyncMock()
 
-    # Simulate db.refresh() populating ID and timestamps
     async def fake_refresh(instance):
         instance.id = "mock-uuid-1234"
         instance.created_at = datetime.now()
         instance.updated_at = datetime.now()
 
     session.refresh.side_effect = fake_refresh
-
     return session
 
 @pytest.fixture
@@ -62,45 +50,39 @@ async def client(mock_db_session):
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user_id_async] = override_get_user
 
-    # Use ASGITransport to talk directly to the app without a real network call
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as ac:
         yield ac
 
     app.dependency_overrides.clear()
 
-# --- TESTS ---
 @pytest.mark.asyncio
-@patch("app.api.routes.gemini_routes.get_chat_history")
-@patch("app.api.routes.gemini_routes.client")
-async def test_process_requirements_success(
-    mock_client_instance,
-    mock_get_history,
-    client,
-    mock_db_session
-):
-    # 1. Setup Mock DB (Chat exists)
+@patch("app.api.routes.gemini_openscad_generate_route.llm_chain")
+async def test_process_requirements_success(mock_llm_chain, client, mock_db_session):
+    """Test successful OpenSCAD code generation with structured output."""
+    # Setup Mock DB (Chat exists)
     mock_chat = MagicMock(spec=Chat)
     mock_chat.id = MOCK_CHAT_ID
     mock_chat.session = MagicMock(spec=UserSession)
     mock_chat.session.user_id = MOCK_USER_ID
     mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_chat
 
-    # 2. Setup Mock Helpers
-    mock_get_history.return_value = [{"role": "user", "parts": ["hi"]}]
+    # Mock the LangChain chain to return a structured OpenSCADResponse
+    mock_response = OpenSCADResponse(
+        openscad_code="cube([10, 10, 10]);",
+        parameters=[OpenSCADParameter(name="size", min_val=5.0, max_val=20.0, default_val=10.0, description="Cube size")],
+        model_type="mechanical",
+        message="Created a simple cube"
+    )
+    mock_llm_chain.ainvoke.return_value = mock_response
 
-    # 3. Setup Gemini Client Mock
-    mock_response = MagicMock()
-    mock_response.text = VALID_GEMINI_RESPONSE
-
-    mock_client_instance.models.generate_content.return_value = mock_response
-
-    # 4. Execute
+    # Execute
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
 
-    # 5. Assertions
+    # Assertions
     assert response.status_code == 200, f"Error: {response.text}"
     data = response.json()
     assert data["role"] == "assistant"
+    assert data["content"] == "Created a simple cube"
 
     # Verify DB interactions
     assert mock_db_session.add.call_count == 2
@@ -109,14 +91,14 @@ async def test_process_requirements_success(
 
 @pytest.mark.asyncio
 async def test_process_requirements_chat_not_found(client, mock_db_session):
+    """Test error when chat doesn't exist."""
     mock_db_session.execute.return_value.scalar_one_or_none.return_value = None
-    # Added missing await
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Chat not found"
+    assert response.status_code == 403
 
 @pytest.mark.asyncio
 async def test_process_requirements_forbidden(client, mock_db_session):
+    """Test error when user doesn't have access to chat."""
     mock_chat = MagicMock(spec=Chat)
     mock_chat.session = MagicMock(spec=UserSession)
     mock_chat.session.user_id = "other-user"
@@ -124,57 +106,43 @@ async def test_process_requirements_forbidden(client, mock_db_session):
 
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
     assert response.status_code == 403
-    assert response.json()["detail"] == "Access denied"
 
 @pytest.mark.asyncio
-@patch("app.api.routes.gemini_routes.get_chat_history")
-@patch("app.api.routes.gemini_routes.client")
-async def test_process_requirements_gemini_error(
-    mock_client_instance,
-    mock_get_history,
-    client,
-    mock_db_session
-):
-    # DB Setup
+@patch("app.api.routes.gemini_openscad_generate_route.llm_chain")
+async def test_process_requirements_llm_error(mock_llm_chain, client, mock_db_session):
+    """Test error handling when LLM chain fails."""
     mock_chat = MagicMock(spec=Chat)
     mock_chat.session = MagicMock(spec=UserSession)
     mock_chat.session.user_id = MOCK_USER_ID
     mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_chat
 
-    # Provide a dummy return for get_chat_history to avoid iteration over MagicMock
-    mock_get_history.return_value = []
-
-    # Mock Error
-    mock_client_instance.models.generate_content.side_effect = Exception("Google API Error")
+    # Mock LLM error
+    mock_llm_chain.ainvoke.side_effect = Exception("LLM API Error")
 
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
-
     assert response.status_code == 500
-    assert "Google API Error" in response.json()["detail"]
+    assert "LLM API Error" in response.json()["detail"]
 
 @pytest.mark.asyncio
-@patch("app.api.routes.gemini_routes.get_chat_history")
-@patch("app.api.routes.gemini_routes.client")
-async def test_process_requirements_invalid_json_response(
-    mock_client_instance,
-    mock_get_history,
-    client,
-    mock_db_session
-):
-    # DB Setup
+@patch("app.api.routes.gemini_openscad_generate_route.llm_chain")
+async def test_process_requirements_chat_response(mock_llm_chain, client, mock_db_session):
+    """Test conversational (non-code) response."""
     mock_chat = MagicMock(spec=Chat)
+    mock_chat.id = MOCK_CHAT_ID
     mock_chat.session = MagicMock(spec=UserSession)
     mock_chat.session.user_id = MOCK_USER_ID
     mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_chat
 
-    # Provide a dummy return for get_chat_history
-    mock_get_history.return_value = []
-
-    # Mock Invalid JSON
-    mock_response = MagicMock()
-    mock_response.text = "This is not JSON"
-    mock_client_instance.models.generate_content.return_value = mock_response
+    # Mock a conversational response (no code)
+    mock_response = OpenSCADResponse(
+        openscad_code="",
+        parameters=[],
+        model_type="chat",
+        message="OpenSCAD is a 3D CAD modeler."
+    )
+    mock_llm_chain.ainvoke.return_value = mock_response
 
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
-
-    assert response.status_code == 500
+    assert response.status_code == 200
+    data = response.json()
+    assert data["content"] == "OpenSCAD is a 3D CAD modeler."

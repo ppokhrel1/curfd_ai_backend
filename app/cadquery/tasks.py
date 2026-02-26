@@ -7,6 +7,7 @@ import logging
 import re
 import json
 import time
+import zipfile
 
 # from .celery_app import celery_app
 
@@ -20,62 +21,152 @@ except OSError:
     GENERATED_FILES_DIR = os.path.join(os.getcwd(), "generated_files")
     os.makedirs(GENERATED_FILES_DIR, exist_ok=True)
 
+# Modules that are structural wrappers / entry-points, not individual selectable parts
+_EXCLUDED_MODULES = {
+    'main', 'combined', 'assembly', 'full', 'complete', 'result', 'model',
+    'scene', 'object', 'all_parts', 'body_combined', 'total',
+}
+
+def _extract_module_names(scad_code: str) -> list:
+    """Return user-defined module names from OpenSCAD code, excluding structural wrappers."""
+    pattern = r'^\s*module\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\('
+    modules = re.findall(pattern, scad_code, re.MULTILINE)
+    return [m for m in modules if m.lower() not in _EXCLUDED_MODULES and not m.startswith('_')]
+
+
+def _run_openscad(script_path: str, output_path: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["openscad", "-o", output_path, script_path],
+        capture_output=True,
+        text=True,
+        cwd=GENERATED_FILES_DIR,
+        timeout=60,
+    )
+
+
+def _raise_openscad_error(stderr: str):
+    error_info = {"line": None, "message": "OpenSCAD compilation failed."}
+    lines = [line.strip() for line in stderr.strip().split('\n') if line.strip()]
+    if lines:
+        error_info["message"] = lines[-1]
+    match = re.search(r'line\s+(\d+)', stderr, re.IGNORECASE)
+    if match:
+        error_info["line"] = int(match.group(1))
+    raise RuntimeError(json.dumps(error_info))
+
+
+def _generate_multipart_zip(task_id: str, script_content: str) -> str:
+    """
+    Compile each named module in the SCAD script as a separate STL, then bundle
+    them into a ZIP.  The frontend's ModelImporter.importZip() loads each STL
+    as a separate named mesh, enabling per-part selection in the viewer.
+    """
+    modules = _extract_module_names(script_content)
+    logger.info(f"[multipart] found modules: {modules}")
+
+    # Strip bare top-level calls (e.g. `main();`) so we can inject our own entry point.
+    top_call_re = re.compile(r'^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\(\s*\)\s*;\s*$', re.MULTILINE)
+    base_script = top_call_re.sub('', script_content)
+
+    module_stls: dict = {}
+
+    for module_name in modules:
+        scad_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}_{module_name}.scad")
+        stl_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}_{module_name}.stl")
+
+        module_script = base_script + f"\n{module_name}();\n"
+        with open(scad_path, "w") as f:
+            f.write(module_script)
+
+        try:
+            result = _run_openscad(scad_path, stl_path)
+            # 84 bytes = empty STL header; skip modules that produce no geometry
+            if result.returncode == 0 and os.path.exists(stl_path) and os.path.getsize(stl_path) > 84:
+                module_stls[module_name] = stl_path
+                logger.info(f"[multipart] compiled {module_name}.stl ({os.path.getsize(stl_path)} bytes)")
+            else:
+                logger.warning(f"[multipart] {module_name} produced no geometry, skipping")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[multipart] {module_name} timed out, skipping")
+        except Exception as e:
+            logger.warning(f"[multipart] {module_name} failed: {e}")
+        finally:
+            if os.path.exists(scad_path):
+                os.remove(scad_path)
+
+    # Fall back to full model if no individual modules produced geometry
+    if not module_stls:
+        logger.info("[multipart] no modules compiled; falling back to full model STL")
+        fallback_scad = os.path.join(GENERATED_FILES_DIR, f"{task_id}.scad")
+        fallback_stl = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
+        with open(fallback_scad, "w") as f:
+            f.write(script_content)
+        try:
+            result = _run_openscad(fallback_scad, fallback_stl)
+            if result.returncode == 0 and os.path.exists(fallback_stl):
+                module_stls["model"] = fallback_stl
+            else:
+                _raise_openscad_error(result.stderr)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(json.dumps({"line": None, "message": "OpenSCAD timed out."}))
+        finally:
+            if os.path.exists(fallback_scad):
+                os.remove(fallback_scad)
+
+    # Bundle into ZIP
+    zip_filename = f"{task_id}.zip"
+    zip_path = os.path.join(GENERATED_FILES_DIR, zip_filename)
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for module_name, stl_path in module_stls.items():
+            zf.write(stl_path, f"{module_name}.stl")
+
+    for stl_path in module_stls.values():
+        try:
+            os.remove(stl_path)
+        except OSError:
+            pass
+
+    logger.info(f"[multipart] created ZIP with {len(module_stls)} part(s): {zip_filename}")
+    return zip_filename
+
+
 # @celery_app.task(bind=True)
 def generate_openscad(task_id: str, script_content: str, output_format: str = "STL"):
     """
     Generates a 3D model file from the provided OpenSCAD script content.
-    """
-    logger.info(f"Starting OpenSCAD generation for task {task_id}")
 
-    # 1. Create a temporary .scad file for the script
+    When output_format is "GLB", each named module is compiled separately and
+    bundled into a ZIP so the frontend can display individually selectable parts.
+    """
+    logger.info(f"Starting OpenSCAD generation for task {task_id} (format={output_format})")
+
+    fmt = output_format.upper()
+
+    if fmt == "GLB":
+        return _generate_multipart_zip(task_id, script_content)
+
+    # Standard single-file compilation
     script_filename = f"{task_id}.scad"
     script_path = os.path.join(GENERATED_FILES_DIR, script_filename)
-    
-    output_filename = f"{task_id}.{output_format.lower()}"
+    output_filename = f"{task_id}.{fmt.lower()}"
     output_path = os.path.join(GENERATED_FILES_DIR, output_filename)
 
-    # 2. Write the raw OpenSCAD code to the file
     with open(script_path, "w") as f:
         f.write(script_content)
 
-    # 3. Execute the script using the openscad CLI
-    # Command format: openscad -o <output_file> <input_file>
     try:
-        result = subprocess.run(
-            ["openscad", "-o", output_path, script_path], 
-            capture_output=True, 
-            text=True, 
-            cwd=GENERATED_FILES_DIR,
-            check=True
-        )
-        logger.info(f"OpenSCAD execution output: {result.stdout}")
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"OpenSCAD execution failed: {e.stderr}")
-        
-        # OpenSCAD parser errors usually look like:
-        # "ERROR: Parser error in line 14: syntax error"
-        error_info = {"line": None, "message": "OpenSCAD compilation failed."}
-        
-        # Try to extract the last meaningful error line
-        lines = [line.strip() for line in e.stderr.strip().split('\n') if line.strip()]
-        if lines:
-            error_info["message"] = lines[-1]
-            
-        # Try to find the exact line number using regex
-        match = re.search(r'line\s+(\d+)', e.stderr, re.IGNORECASE)
-        if match:
-            error_info["line"] = int(match.group(1))
-            
-        raise RuntimeError(json.dumps(error_info))
+        result = _run_openscad(script_path, output_path)
+        if result.returncode != 0:
+            _raise_openscad_error(result.stderr)
+        logger.info(f"OpenSCAD output: {result.stdout}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(json.dumps({"line": None, "message": "OpenSCAD timed out."}))
     finally:
-        # Cleanup the .scad script file after compilation if you don't need to keep it
-        # pass
-        pass
+        if os.path.exists(script_path):
+            os.remove(script_path)
 
-    # 4. Verify output
     if not os.path.exists(output_path):
-         raise RuntimeError("Output file was not created by OpenSCAD.")
+        raise RuntimeError("Output file was not created by OpenSCAD.")
 
     return output_filename
 
@@ -204,8 +295,8 @@ else:
             
         raise RuntimeError(json.dumps(error_info))
     finally:
-        # Cleanup script? Maybe keep for debugging for now.
-        pass
+        if os.path.exists(script_path):
+            os.remove(script_path)
 
     if not os.path.exists(output_path):
          raise RuntimeError("Output file was not created.")

@@ -5,12 +5,12 @@ if not settings.database_url:
     raise RuntimeError("Database URL is not configured")
 
 engine = create_async_engine(
-    settings.database_url, 
-    pool_pre_ping=True, 
+    settings.database_url,
+    pool_pre_ping=True,
     future=True,
-    connect_args={
-        "prepare_threshold": None    # ← Disable prepared statement caching
-    },
+    # Supabase uses PgBouncer in transaction-pool mode (port 6543).
+    # PgBouncer doesn't support asyncpg prepared statements, so disable caching.
+    connect_args={"statement_cache_size": 0},
 )
 
 SessionLocal = async_sessionmaker(
