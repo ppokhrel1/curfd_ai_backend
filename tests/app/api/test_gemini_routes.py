@@ -9,7 +9,7 @@ from app.db.session import get_db
 from app.core.deps import get_current_user_id_async
 from app.models.chat import Chat
 from app.models.session import Session as UserSession
-from app.api.routes.gemini_openscad_generate_route import OpenSCADResponse, OpenSCADParameter
+from app.schemas.openscad import OpenSCADResponse, OpenSCADParameter
 
 ENDPOINT_URL = "/api/v1/openscad/process_requirements"
 
@@ -56,8 +56,8 @@ async def client(mock_db_session):
     app.dependency_overrides.clear()
 
 @pytest.mark.asyncio
-@patch("app.api.routes.gemini_openscad_generate_route.llm_chain")
-async def test_process_requirements_success(mock_llm_chain, client, mock_db_session):
+@patch("app.api.routes.gemini_openscad_generate_route.run_agent")
+async def test_process_requirements_success(mock_run_agent, client, mock_db_session):
     """Test successful OpenSCAD code generation with structured output."""
     # Setup Mock DB (Chat exists)
     mock_chat = MagicMock(spec=Chat)
@@ -66,14 +66,14 @@ async def test_process_requirements_success(mock_llm_chain, client, mock_db_sess
     mock_chat.session.user_id = MOCK_USER_ID
     mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_chat
 
-    # Mock the LangChain chain to return a structured OpenSCADResponse
+    # Mock the agent to return a structured OpenSCADResponse
     mock_response = OpenSCADResponse(
         openscad_code="cube([10, 10, 10]);",
         parameters=[OpenSCADParameter(name="size", min_val=5.0, max_val=20.0, default_val=10.0, description="Cube size")],
         model_type="mechanical",
         message="Created a simple cube"
     )
-    mock_llm_chain.ainvoke.return_value = mock_response
+    mock_run_agent.return_value = mock_response
 
     # Execute
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
@@ -108,24 +108,24 @@ async def test_process_requirements_forbidden(client, mock_db_session):
     assert response.status_code == 403
 
 @pytest.mark.asyncio
-@patch("app.api.routes.gemini_openscad_generate_route.llm_chain")
-async def test_process_requirements_llm_error(mock_llm_chain, client, mock_db_session):
-    """Test error handling when LLM chain fails."""
+@patch("app.api.routes.gemini_openscad_generate_route.run_agent")
+async def test_process_requirements_llm_error(mock_run_agent, client, mock_db_session):
+    """Test error handling when agent fails."""
     mock_chat = MagicMock(spec=Chat)
     mock_chat.session = MagicMock(spec=UserSession)
     mock_chat.session.user_id = MOCK_USER_ID
     mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_chat
 
-    # Mock LLM error
-    mock_llm_chain.ainvoke.side_effect = Exception("LLM API Error")
+    # Mock agent error
+    mock_run_agent.side_effect = Exception("LLM API Error")
 
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
     assert response.status_code == 500
     assert "LLM API Error" in response.json()["detail"]
 
 @pytest.mark.asyncio
-@patch("app.api.routes.gemini_openscad_generate_route.llm_chain")
-async def test_process_requirements_chat_response(mock_llm_chain, client, mock_db_session):
+@patch("app.api.routes.gemini_openscad_generate_route.run_agent")
+async def test_process_requirements_chat_response(mock_run_agent, client, mock_db_session):
     """Test conversational (non-code) response."""
     mock_chat = MagicMock(spec=Chat)
     mock_chat.id = MOCK_CHAT_ID
@@ -140,7 +140,7 @@ async def test_process_requirements_chat_response(mock_llm_chain, client, mock_d
         model_type="chat",
         message="OpenSCAD is a 3D CAD modeler."
     )
-    mock_llm_chain.ainvoke.return_value = mock_response
+    mock_run_agent.return_value = mock_response
 
     response = await client.post(ENDPOINT_URL, json=VALID_PAYLOAD)
     assert response.status_code == 200

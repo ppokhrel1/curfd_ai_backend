@@ -13,9 +13,11 @@ python-jose[cryptography]==3.3.0
 typer
 greenlet
 google-genai
-langchain
+langchain>=0.3.25,<0.4
+langchain-core>=0.3.25,<0.4
 langchain-google-genai
-langchain-core
+langchain-openai
+langchain-anthropic
 cadquery
 casadi
 celery

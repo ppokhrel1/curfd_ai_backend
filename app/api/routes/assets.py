@@ -1,18 +1,89 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, or_
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select, or_, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
 from app.db.session import get_db
 from app.models.asset import Asset as AssetModel
+from app.models.asset_meta import AssetMeta as AssetMetaModel
 from app.models.job import Job as JobModel
 from app.models.session import Session as SessionModel
-from app.schemas.asset import AssetCreate, AssetRead
+from app.schemas.asset import AssetCreate, AssetRead, AssetSearchResult
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/search", response_model=list[AssetSearchResult])
+async def search_assets(
+    q: str = Query("", min_length=0, description="Search query for part names"),
+    category: str | None = Query(None, description="Filter by model_type category"),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Search individual parts by name with optional category filter.
+    Only returns openscad_part assets (not full models) so swap works at part level.
+    """
+    stmt = (
+        select(
+            AssetModel,
+            AssetMetaModel.part_name,
+            AssetMetaModel.component_of,
+            AssetMetaModel.position_json,
+            AssetMetaModel.material_json,
+        )
+        .join(AssetMetaModel, AssetMetaModel.asset_id == AssetModel.id)
+        .join(JobModel, AssetModel.job_id == JobModel.id)
+        .join(SessionModel, JobModel.session_id == SessionModel.id)
+        .where(SessionModel.user_id == user_id)
+        .where(AssetModel.asset_type == "openscad_part")
+    )
+
+    if q:
+        stmt = stmt.where(AssetMetaModel.part_name.ilike(f"%{q}%"))
+
+    if category:
+        stmt = stmt.where(
+            AssetModel.metadata_json.op("->>")("model_type") == category
+        )
+
+    # Order: exact match first, then partial, then by date
+    if q:
+        stmt = stmt.order_by(
+            case(
+                (func.lower(AssetMetaModel.part_name) == q.lower(), 0),
+                else_=1,
+            ),
+            AssetModel.created_at.desc(),
+        )
+    else:
+        stmt = stmt.order_by(AssetModel.created_at.desc())
+
+    stmt = stmt.limit(limit)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return [
+        AssetSearchResult(
+            id=asset.id,
+            created_at=asset.created_at,
+            updated_at=asset.updated_at,
+            job_id=asset.job_id,
+            asset_type=asset.asset_type,
+            uri=asset.uri,
+            storage_provider=asset.storage_provider,
+            metadata_json=asset.metadata_json,
+            part_name=part_name,
+            component_of=component_of,
+            position_json=position_json,
+            material_json=material_json,
+        )
+        for asset, part_name, component_of, position_json, material_json in rows
+    ]
 
 
 @router.post("", response_model=AssetRead, status_code=status.HTTP_201_CREATED)

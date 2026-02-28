@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     hf_token: str | None = None
     replicate_api_token: str | None = None
 
+    # LLM provider configuration
+    llm_provider: str = "gemini"  # "gemini" | "openai" | "anthropic"
+    llm_model: str | None = None  # Override model name, or use provider default
+    llm_temperature: float = 0.2
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+
+    # Agent configuration
+    agent_max_iterations: int = 5
+
     runpod_base_url: str = "https://api.runpod.ai/v2/k91olo35clkkky"
     runpod_api_token: str | None = None
     runpod_status_poll_interval_seconds: float = 2.5
