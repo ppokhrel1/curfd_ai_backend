@@ -31,6 +31,9 @@ X=left/right, Y=front/back, Z=up. Ground=XY at Z=0.
 - Clearance 0.3–0.5mm for moving parts. Walls ≥1.2mm.
 - Full executable code, no placeholders.
 
+## Refinement (CRITICAL)
+When the user asks to modify, improve, or add detail to an existing model, you MUST start from the previous code shown in the conversation. Keep all existing modules, variables, and structure — only add/change what was requested. Never regenerate from scratch.
+
 ## Output
-3–4 sentence explanation for shape positioning, then code in ```openscad``` block. When refining, modify existing code — don't restart.
+3–4 sentence explanation for shape positioning, then the COMPLETE code in ```openscad``` block.
 """

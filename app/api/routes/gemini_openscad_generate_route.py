@@ -39,14 +39,15 @@ _EXCLUDED_MODULES = frozenset({
     "body_combined", "total",
 })
 
-_MODULE_RE = re.compile(r"^\s*module\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", re.MULTILINE)
+_MODULE_RE = re.compile(r"^\s*module\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)", re.MULTILINE)
 
 
 def _extract_module_names(scad_code: str) -> list[str]:
-    """Extract module names from OpenSCAD code, excluding structural wrappers."""
+    """Extract module names from OpenSCAD code, excluding structural wrappers
+    and parameterized helper modules (which can't be compiled standalone)."""
     return [
-        m for m in _MODULE_RE.findall(scad_code)
-        if m.lower() not in _EXCLUDED_MODULES
+        name for name, params in _MODULE_RE.findall(scad_code)
+        if name.lower() not in _EXCLUDED_MODULES and not params.strip()
     ]
 
 
@@ -185,24 +186,13 @@ async def _build_lc_history(db: AsyncSession, chat_id: str) -> list:
             code = meta.get("openscad_code") if isinstance(meta, dict) else None
             friendly = meta.get("message") if isinstance(meta, dict) else None
 
-            # Show previous AI responses in JSON format so the model learns to output JSON,
-            # not markdown. (Markdown history was causing the model to mimic code-fence format.)
+            # Present previous code naturally so the model recognizes it as its own
+            # output and can refine it on follow-up requests.
             if code:
-                ai_json = json.dumps({
-                    "openscad_code": code,
-                    "parameters": meta.get("parameters", []) if isinstance(meta, dict) else [],
-                    "model_type": meta.get("model_type", "mechanical") if isinstance(meta, dict) else "mechanical",
-                    "message": friendly or "",
-                })
-                lc_messages.append(AIMessage(content=ai_json))
+                ai_text = f"{friendly or 'Here is the model.'}\n\n```openscad\n{code}\n```"
+                lc_messages.append(AIMessage(content=ai_text))
             elif msg.content and msg.content != "Model generated.":
-                ai_json = json.dumps({
-                    "openscad_code": "",
-                    "parameters": [],
-                    "model_type": "chat",
-                    "message": msg.content,
-                })
-                lc_messages.append(AIMessage(content=ai_json))
+                lc_messages.append(AIMessage(content=msg.content))
 
     return lc_messages
 

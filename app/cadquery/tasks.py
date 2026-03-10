@@ -78,10 +78,18 @@ def _clean_scad(code: str) -> str:
 
 
 def _extract_module_names(scad_code: str) -> list:
-    """Return user-defined module names from OpenSCAD code, excluding structural wrappers."""
-    pattern = r'^\s*module\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\('
-    modules = re.findall(pattern, scad_code, re.MULTILINE)
-    return [m for m in modules if m.lower() not in _EXCLUDED_MODULES and not m.startswith('_')]
+    """Return user-defined module names from OpenSCAD code, excluding structural wrappers
+    and parameterized helper modules (which can't be compiled standalone)."""
+    pattern = r'^\s*module\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)'
+    results = []
+    for name, params in re.findall(pattern, scad_code, re.MULTILINE):
+        if name.lower() in _EXCLUDED_MODULES or name.startswith('_'):
+            continue
+        # Skip modules that take parameters — they're helpers, not standalone parts
+        if params.strip():
+            continue
+        results.append(name)
+    return results
 
 
 def _content_hash(content: str) -> str:
