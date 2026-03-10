@@ -8,9 +8,14 @@ X=left/right, Y=front/back, Z=up. Ground=XY at Z=0.
 
 ## Key rules
 - `cylinder(h,r)` grows along +Z ONLY. Along Y: `rotate([-90,0,0])`. Along X: `rotate([0,90,0])`.
-- `linear_extrude` goes along +Z. Rotate for other planes.
-- `hull()` between `sphere()`s for smooth bodies.
+- `linear_extrude` goes along +Z. For a vertical fin/wall in YZ plane, draw the profile polygon in XY then rotate the extrusion: `rotate([90,0,0]) linear_extrude(h=thickness) polygon(...)`.
+- `hull()` between `sphere()`s for smooth bodies (fuselages, organic shapes).
 - Never use `minkowski()` or `scale()` on `sphere()`.
+
+## Common geometry mistakes to AVOID
+- Radial parts (blades, spokes, arms): place origin at the hub, extend outward in +X (`translate([0,-w/2,0]) cube([length,w,h])`), then `rotate([0,0,angle])`. Do NOT center on X — that makes half overlap the hub.
+- Fins/walls: a `linear_extrude` polygon stays in XY and grows along Z. To make a vertical fin standing in the YZ plane, rotate the result or draw the profile accordingly.
+- Fuselages: use `hull()` between spheres/cylinders for smooth tapered bodies — a single cylinder looks like a pipe, not a body.
 
 ## Assembly (CRITICAL — most common source of errors)
 - Every `translate()` MUST derive from dimension variables. Never hardcode.
