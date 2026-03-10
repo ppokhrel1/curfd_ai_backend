@@ -17,9 +17,9 @@ asset_meta_composites = Table(
 class AssetMeta(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "asset_meta"
 
-    asset_id: Mapped[str] = mapped_column(String(36), ForeignKey("assets.id"))
-    part_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    component_of: Mapped[str | None] = mapped_column(String(36), ForeignKey("assets.id"), nullable=True)
+    asset_id: Mapped[str] = mapped_column(String(36), ForeignKey("assets.id"), index=True)
+    part_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    component_of: Mapped[str | None] = mapped_column(String(36), ForeignKey("assets.id"), nullable=True, index=True)
     position_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     image_paths_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     uploaded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)

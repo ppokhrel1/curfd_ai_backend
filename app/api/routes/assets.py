@@ -4,6 +4,7 @@ from sqlalchemy import select, or_, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
+from app.core.ownership import get_asset_verified
 from app.db.session import get_db
 from app.models.asset import Asset as AssetModel
 from app.models.asset_meta import AssetMeta as AssetMetaModel
@@ -92,15 +93,18 @@ async def create_asset(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    job = await db.get(JobModel, payload.job_id)
-    if not job:
+    # Single query: verify job exists + ownership
+    row = (
+        await db.execute(
+            select(JobModel, SessionModel.user_id)
+            .join(SessionModel, JobModel.session_id == SessionModel.id)
+            .where(JobModel.id == payload.job_id)
+        )
+    ).one_or_none()
+    if not row:
         raise HTTPException(status_code=404, detail="Job not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .where(JobModel.id == payload.job_id)
-    )
-    if owner and owner != user_id:
+    _, owner_id = row
+    if owner_id and owner_id != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     asset = AssetModel(
         job_id=payload.job_id,
@@ -162,18 +166,7 @@ async def get_asset(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    asset = await db.get(AssetModel, asset_id)
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .join(AssetModel, AssetModel.job_id == JobModel.id)
-        .where(AssetModel.id == asset_id)
-    )
-    if owner and owner != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return asset
+    return await get_asset_verified(db, asset_id, user_id)
 
 
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -182,17 +175,7 @@ async def delete_asset(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    asset = await db.get(AssetModel, asset_id)
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .join(AssetModel, AssetModel.job_id == JobModel.id)
-        .where(AssetModel.id == asset_id)
-    )
-    if owner and owner != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    asset = await get_asset_verified(db, asset_id, user_id)
     await db.delete(asset)
     await db.commit()
     return None

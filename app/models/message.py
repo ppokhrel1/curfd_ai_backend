@@ -9,7 +9,7 @@ from app.models.mixins import TimestampMixin, UUIDMixin
 class Message(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "messages"
 
-    chat_id: Mapped[str] = mapped_column(String(36), ForeignKey("chats.id"))
+    chat_id: Mapped[str] = mapped_column(String(36), ForeignKey("chats.id"), index=True)
     role: Mapped[str] = mapped_column(String(50))
     content: Mapped[str] = mapped_column(Text)
     tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

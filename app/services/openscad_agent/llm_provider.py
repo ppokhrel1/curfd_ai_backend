@@ -1,23 +1,45 @@
+import logging
 import os
+from functools import lru_cache
 
 from langchain_core.language_models import BaseChatModel
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 _DEFAULTS = {
+    "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-2.5-flash",
     "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-20250514",
+    "anthropic": "claude-haiku-4-5-20251001",
+    "openrouter": "anthropic/claude-sonnet-4",
 }
 
+# Providers that support extended thinking
+_THINKING_PROVIDERS = frozenset({"anthropic"})
 
-def get_llm() -> BaseChatModel:
-    """Return a LangChain chat model based on settings.llm_provider."""
-    provider = settings.llm_provider.lower()
-    model = settings.llm_model or _DEFAULTS.get(provider)
+
+@lru_cache(maxsize=16)
+def get_llm(
+    provider: str | None = None,
+    model: str | None = None,
+    thinking: bool = False,
+) -> BaseChatModel:
+    """Return a LangChain chat model, cached by (provider, model, thinking)."""
+    provider = (provider or settings.llm_provider).lower()
+    model = model or settings.llm_model or _DEFAULTS.get(provider)
     temperature = settings.llm_temperature
 
-    if provider == "gemini":
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(
+            model=model,
+            api_key=settings.groq_api_key or os.getenv("GROQ_API_KEY"),
+            temperature=temperature,
+        )
+    elif provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(
@@ -35,11 +57,49 @@ def get_llm() -> BaseChatModel:
         )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
+        import langchain_anthropic
 
-        return ChatAnthropic(
+        lc_version = getattr(langchain_anthropic, "__version__", "0.0.0")
+        logger.info(f"[LLM] langchain-anthropic version: {lc_version}")
+
+        kwargs: dict = {
+            "model": model,
+            "api_key": settings.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
+        }
+        if thinking:
+            # Check if this version supports native `thinking` parameter
+            try:
+                from packaging.version import Version
+                supports_thinking = Version(lc_version) >= Version("0.3.0")
+            except Exception:
+                # packaging not available or version unparsable — try native first
+                supports_thinking = hasattr(ChatAnthropic, "model_fields") and "thinking" in ChatAnthropic.model_fields
+
+            if supports_thinking:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 3_000}
+            else:
+                kwargs["model_kwargs"] = {"thinking": {"type": "enabled", "budget_tokens": 3_000}}
+                logger.warning("[LLM] Old langchain-anthropic — using model_kwargs for thinking. Run: pip install 'langchain-anthropic>=0.3' --upgrade")
+            kwargs["max_tokens"] = 16_000
+            kwargs["temperature"] = 1
+            logger.info(f"[LLM] Creating Anthropic LLM with THINKING ENABLED: model={model}")
+        else:
+            kwargs["temperature"] = temperature
+            logger.info(f"[LLM] Creating Anthropic LLM: model={model}, thinking=OFF")
+
+        return ChatAnthropic(**kwargs)
+    elif provider == "openrouter":
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
             model=model,
-            api_key=settings.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
+            api_key=settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY"),
+            base_url="https://openrouter.ai/api/v1",
             temperature=temperature,
+            default_headers={
+                "HTTP-Referer": settings.frontend_url or "https://nooriat.com",
+                "X-Title": "CURFD AI",
+            },
         )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

@@ -1,5 +1,8 @@
 import json
 import logging
+import re
+from collections.abc import AsyncGenerator
+from functools import lru_cache
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
@@ -16,17 +19,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Build components once at module level
-_llm = get_llm()
+# Tools (stateless, safe at module level)
 _tools = [validate_openscad_code, analyze_openscad_parameters, search_openscad_reference]
 _tools_by_name = {t.name: t for t in _tools}
 
-# LLM with tools bound (replaces create_tool_calling_agent)
-_llm_with_tools = _llm.bind_tools(_tools)
-
-# Structured output LLM for extraction step
-_structured_llm = _llm.with_structured_output(OpenSCADResponse)
-
+# Prompts (stateless templates, safe at module level)
 _extraction_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -49,30 +46,80 @@ _extraction_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-_extraction_chain = _extraction_prompt | _structured_llm
+_generate_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", SYSTEM_PROMPT),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "{input}"),
+    ]
+)
+
+
+# ── Cached component factory ─────────────────────────────────────────────────
+
+@lru_cache(maxsize=16)
+def _get_components(provider: str | None = None, model: str | None = None, thinking: bool = False):
+    """Lazily create and cache LLM + chains for a given provider/model pair."""
+    llm = get_llm(provider, model, thinking)
+    resolved_provider = (provider or settings.llm_provider).lower()
+
+    generate_chain = _generate_prompt | llm
+    structured_llm = llm.with_structured_output(OpenSCADResponse)
+    extraction_chain = _extraction_prompt | structured_llm
+
+    tools_supported = resolved_provider not in ("groq",)
+    llm_with_tools = llm.bind_tools(_tools) if tools_supported else None
+
+    return {
+        "llm": llm,
+        "generate_chain": generate_chain,
+        "extraction_chain": extraction_chain,
+        "llm_with_tools": llm_with_tools,
+        "tools_supported": tools_supported,
+        "provider": resolved_provider,
+    }
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _build_human_message(user_input: str, image_data_urls: list[str] | None = None) -> HumanMessage:
+    """Build a HumanMessage, optionally with image content blocks."""
+    if not image_data_urls:
+        return HumanMessage(content=user_input)
+
+    content_blocks: list[dict] = [{"type": "text", "text": user_input}]
+    for url in image_data_urls:
+        content_blocks.append({
+            "type": "image_url",
+            "image_url": {"url": url},
+        })
+    logger.info(f"[LLM] Multimodal input with {len(image_data_urls)} image(s)")
+    return HumanMessage(content=content_blocks)
 
 
 async def _run_tool_loop(
     user_input: str,
     history: list[HumanMessage | AIMessage],
     max_iterations: int,
+    llm_with_tools,
+    llm,
+    image_data_urls: list[str] | None = None,
 ) -> str:
     """
     Manual tool-calling loop using llm.bind_tools().
     Calls the LLM, executes any tool calls, feeds results back, repeats.
     Returns the final text response from the LLM.
     """
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(history) + [HumanMessage(content=user_input)]
+    human_msg = _build_human_message(user_input, image_data_urls)
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(history) + [human_msg]
 
     for _ in range(max_iterations):
-        response = await _llm_with_tools.ainvoke(messages)
+        response = await llm_with_tools.ainvoke(messages)
         messages.append(response)
 
-        # If no tool calls, we're done
         if not response.tool_calls:
-            return response.content or ""
+            return _extract_text_content(response)
 
-        # Execute each tool call and append results
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
@@ -90,45 +137,33 @@ async def _run_tool_loop(
             logger.info(f"Tool {tool_name} returned: {tool_result[:200]}")
             messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_id))
 
-    # Max iterations reached — get a final response without tools
-    response = await _llm.ainvoke(messages)
-    return response.content or ""
+    response = await llm.ainvoke(messages)
+    return _extract_text_content(response)
 
 
-async def run_agent(
-    user_input: str,
-    history: list[HumanMessage | AIMessage],
-) -> OpenSCADResponse:
-    """
-    Two-step agent invocation:
-    1. Agent reasons with tools (validation, parameter analysis, doc search)
-    2. Structured output extraction from the agent's final answer
-    """
-    # Step 1: Agent execution with tools
+def _extract_text_content(response) -> str:
+    """Extract text from an AI response, handling both string and list content (thinking mode)."""
+    content = response.content if hasattr(response, "content") else str(response)
+    if isinstance(content, list):
+        # Extended thinking returns list of blocks; extract only text blocks
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "thinking":
+                    thinking_text = block.get("thinking", "")
+                    logger.info(f"[THINKING] {thinking_text[:500]}{'...' if len(thinking_text) > 500 else ''}")
+                elif block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return content or ""
+
+
+async def _extract_structured(agent_output: str, extraction_chain) -> OpenSCADResponse:
+    """Extract structured OpenSCADResponse from free-text LLM output."""
     try:
-        agent_output = await _run_tool_loop(
-            user_input, history, settings.agent_max_iterations
-        )
-    except Exception as e:
-        logger.error(f"Agent execution failed: {e}", exc_info=True)
-        # Fallback: run without tools
-        fallback_chain = (
-            ChatPromptTemplate.from_messages(
-                [
-                    ("system", SYSTEM_PROMPT),
-                    MessagesPlaceholder(variable_name="history"),
-                    ("human", "{input}"),
-                ]
-            )
-            | _structured_llm
-        )
-        return await fallback_chain.ainvoke(
-            {"input": user_input, "history": history}
-        )
-
-    # Step 2: Extract structured output
-    try:
-        response: OpenSCADResponse = await _extraction_chain.ainvoke(
+        response: OpenSCADResponse = await extraction_chain.ainvoke(
             {"agent_output": agent_output}
         )
         return response
@@ -144,3 +179,210 @@ async def run_agent(
                 model_type="chat",
                 message=agent_output[:500],
             )
+
+
+async def _post_validate(response: OpenSCADResponse, generate_chain, extraction_chain) -> OpenSCADResponse:
+    """Validate generated code with OpenSCAD after extraction."""
+    code = response.openscad_code
+    if not code or not code.strip():
+        return response
+
+    result = await validate_openscad_code.ainvoke({"openscad_code": code})
+    if result.startswith("VALID") or result.startswith("SKIPPED"):
+        logger.info(f"Post-validation: {result[:80]}")
+        return response
+
+    logger.warning(f"Post-validation failed: {result[:200]}")
+    try:
+        fix_output = await generate_chain.ainvoke({
+            "input": (
+                f"The following OpenSCAD code has a compilation error. Fix it and return the corrected full script.\n\n"
+                f"Error: {result}\n\n"
+                f"Code:\n```\n{code}\n```"
+            ),
+            "history": [],
+        })
+        fix_text = _extract_text_content(fix_output)
+        fix_response = await _extract_structured(fix_text, extraction_chain)
+        if fix_response.openscad_code:
+            logger.info("Post-validation: LLM returned fixed code")
+            return fix_response
+    except Exception as e:
+        logger.error(f"Post-validation fix failed: {e}")
+
+    return response
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+async def run_agent(
+    user_input: str,
+    history: list[HumanMessage | AIMessage],
+    image_data_urls: list[str] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    thinking: bool = False,
+) -> OpenSCADResponse:
+    """
+    Two-step agent invocation:
+    1. Generate free-text response (with or without tools)
+    2. Extract structured OpenSCADResponse from the text
+    3. Post-validate generated code
+    """
+    c = _get_components(provider, model, thinking)
+
+    if image_data_urls:
+        # Multimodal: bypass prompt template, construct messages manually
+        human_msg = _build_human_message(user_input, image_data_urls)
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(history) + [human_msg]
+        result = await c["llm"].ainvoke(messages)
+        agent_output = _extract_text_content(result)
+    elif c["tools_supported"] and c["llm_with_tools"] is not None:
+        try:
+            agent_output = await _run_tool_loop(
+                user_input, history, settings.agent_max_iterations,
+                c["llm_with_tools"], c["llm"],
+            )
+        except Exception as e:
+            logger.error(f"Tool loop failed, falling back to direct generation: {e}")
+            result = await c["generate_chain"].ainvoke(
+                {"input": user_input, "history": history}
+            )
+            agent_output = _extract_text_content(result)
+    else:
+        result = await c["generate_chain"].ainvoke(
+            {"input": user_input, "history": history}
+        )
+        agent_output = _extract_text_content(result)
+
+    logger.info(f"Agent output (first 300 chars): {agent_output[:300]}")
+
+    response = await _extract_structured(agent_output, c["extraction_chain"])
+
+    if not c["tools_supported"]:
+        response = await _post_validate(response, c["generate_chain"], c["extraction_chain"])
+
+    return response
+
+
+# ── Streaming (single-call) approach ──────────────────────────────────────────
+
+_CODE_BLOCK_RE = re.compile(r"```(?:openscad)?\s*\n(.*?)```", re.DOTALL)
+_PARAM_RE = re.compile(
+    r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([-+]?[0-9]*\.?[0-9]+)\s*;",
+    re.MULTILINE,
+)
+_IGNORED_VARS = frozenset({"$fn", "$fa", "$fs", "eps", "epsilon"})
+
+
+def _extract_parameters_from_code(code: str) -> list[dict]:
+    """Extract tunable parameters from OpenSCAD top-level variable assignments."""
+    params = []
+    for m in _PARAM_RE.finditer(code):
+        name = m.group(1)
+        val = float(m.group(2))
+        if name in _IGNORED_VARS or name.startswith("$"):
+            continue
+        min_val = val * 0.5 if val > 0 else val - 10
+        max_val = val * 1.5 if val > 0 else val + 10
+        if min_val == max_val:
+            min_val -= 5
+            max_val += 5
+        params.append({
+            "name": name,
+            "default_val": val,
+            "min_val": round(min_val, 2),
+            "max_val": round(max_val, 2),
+            "description": f"Parameter: {name}",
+        })
+    return params
+
+
+def _extract_from_text(text: str) -> dict:
+    """Extract OpenSCAD code and metadata from LLM free-text output via regex."""
+    from app.cadquery.tasks import _clean_scad
+
+    code_match = _CODE_BLOCK_RE.search(text)
+    code = code_match.group(1).strip() if code_match else ""
+
+    if code:
+        code = _clean_scad(code)
+
+    if code_match:
+        message = text[: code_match.start()].strip()
+        if not message:
+            after = text[code_match.end() :].strip()
+            message = after if after else ""
+    else:
+        message = text.strip()
+
+    if not message:
+        message = "Model generated." if code else "Here to help!"
+
+    if len(message) > 500:
+        message = message[:500]
+
+    parameters = _extract_parameters_from_code(code) if code else []
+    model_type = "chat" if not code else "mechanical"
+
+    return {
+        "openscad_code": code,
+        "parameters": parameters,
+        "model_type": model_type,
+        "message": message,
+    }
+
+
+async def run_agent_stream(
+    user_input: str,
+    history: list[HumanMessage | AIMessage],
+    image_data_urls: list[str] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    thinking: bool = False,
+) -> AsyncGenerator[dict, None]:
+    """
+    Single LLM call with token streaming.
+    Yields: {"type": "token", "text": "..."} for each text token
+    Yields: {"type": "done", "data": {...}} at the end with extracted structured data
+    Filters out thinking/reasoning blocks — only streams visible text.
+    """
+    c = _get_components(provider, model, thinking)
+    logger.info(f"[STREAM] provider={c['provider']}, model={model}, thinking={thinking}, images={len(image_data_urls or [])}")
+    full_text = ""
+    thinking_seen = False
+
+    # Choose streaming source: direct LLM for multimodal, chain for text-only
+    if image_data_urls:
+        human_msg = _build_human_message(user_input, image_data_urls)
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(history) + [human_msg]
+        stream_source = c["llm"].astream(messages)
+    else:
+        stream_source = c["generate_chain"].astream(
+            {"input": user_input, "history": history}
+        )
+
+    try:
+        async for chunk in stream_source:
+            # Log raw chunk type for first few chunks to debug thinking
+            content = chunk.content if hasattr(chunk, "content") else chunk
+            if isinstance(content, list) and not thinking_seen:
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "thinking":
+                        thinking_seen = True
+                        logger.info("[STREAM] Thinking block detected in stream!")
+                        break
+
+            token = _extract_text_content(chunk)
+            if token:
+                full_text += token
+                yield {"type": "token", "text": token}
+    except Exception as e:
+        logger.error(f"Streaming generation failed: {e}", exc_info=True)
+        yield {"type": "error", "message": str(e)}
+        return
+
+    logger.info(f"[STREAM] Complete, length={len(full_text)}, thinking_seen={thinking_seen}")
+
+    response = _extract_from_text(full_text)
+    yield {"type": "done", "data": response}

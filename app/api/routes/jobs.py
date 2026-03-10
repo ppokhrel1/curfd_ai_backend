@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
+from app.core.ownership import get_job_verified
 from app.db.session import get_db
 from app.models.job import Job as JobModel
 from app.models.session import Session as SessionModel
@@ -70,19 +71,7 @@ async def get_job(
     user_id: str = Depends(get_current_user_id),
 ):
     logger.info(f"User {user_id} getting job {job_id}")
-    job = await db.get(JobModel, job_id)
-    if not job:
-        logger.warning(f"Job not found: {job_id}")
-        raise HTTPException(status_code=404, detail="Job not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .where(JobModel.id == job_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from accessing job {job_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return job
+    return await get_job_verified(db, job_id, user_id)
 
 
 @router.patch("/{job_id}", response_model=JobRead)
@@ -92,24 +81,11 @@ async def update_job(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    logger.info(f"User {user_id} updating job {job_id} with payload: {payload.model_dump_json(exclude_unset=True)}")
-    job = await db.get(JobModel, job_id)
-    if not job:
-        logger.warning(f"Job not found: {job_id}")
-        raise HTTPException(status_code=404, detail="Job not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .where(JobModel.id == job_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from updating job {job_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
-
+    logger.info(f"User {user_id} updating job {job_id}")
+    job = await get_job_verified(db, job_id, user_id)
     update_data = payload.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(job, key, value)
-
     await db.commit()
     await db.refresh(job)
     logger.info(f"Job {job_id} updated by user {user_id}")
@@ -123,18 +99,7 @@ async def start_job(
     user_id: str = Depends(get_current_user_id),
 ):
     logger.info(f"User {user_id} starting job {job_id}")
-    job = await db.get(JobModel, job_id)
-    if not job:
-        logger.warning(f"Job not found: {job_id}")
-        raise HTTPException(status_code=404, detail="Job not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .where(JobModel.id == job_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from starting job {job_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
+    job = await get_job_verified(db, job_id, user_id)
     job.status = "running"
     job.started_at = datetime.now(timezone.utc)
     await db.commit()
@@ -151,18 +116,7 @@ async def complete_job(
     user_id: str = Depends(get_current_user_id),
 ):
     logger.info(f"User {user_id} completing job {job_id} with success={success}")
-    job = await db.get(JobModel, job_id)
-    if not job:
-        logger.warning(f"Job not found: {job_id}")
-        raise HTTPException(status_code=404, detail="Job not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(JobModel, JobModel.session_id == SessionModel.id)
-        .where(JobModel.id == job_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from completing job {job_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
+    job = await get_job_verified(db, job_id, user_id)
     job.status = "succeeded" if success else "failed"
     job.finished_at = datetime.now(timezone.utc)
     await db.commit()

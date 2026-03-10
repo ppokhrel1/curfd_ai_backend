@@ -11,7 +11,7 @@ from app.models.mixins import TimestampMixin, UUIDMixin
 class Job(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "jobs"
 
-    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"))
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
     status: Mapped[str] = mapped_column(String(50), default="queued")
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_image_uri: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -7,7 +7,6 @@ from app.api.routes import (
     auth,
     chat_stream,
     chats,
-    gemini_routes,
     health,
     jobs,
     messages,
@@ -16,7 +15,8 @@ from app.api.routes import (
     sessions,
     cadquery,
     gemini_openscad_generate_route,
-    openscad
+    openscad,
+    uploads,
 )
 
 api_router = APIRouter()
@@ -30,11 +30,11 @@ api_router.include_router(chat_stream.router, tags=["chat-stream"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(assets.router, prefix="/assets", tags=["assets"])
 api_router.include_router(asset_meta.router, prefix="/asset-meta", tags=["asset-meta"])
-api_router.include_router(gemini_routes.router, prefix="/gemini", tags=["gemini"])
 api_router.include_router(cadquery.router, prefix="/cadquery", tags=["cadquery"])
 api_router.include_router(gemini_openscad_generate_route.router, prefix="/openscad", tags=["openscad"])
 api_router.include_router(openscad.router, prefix="/openscad-3d", tags=["OpenSCAD-3D"])
 api_router.include_router(scad_genetic_algo.router, prefix="/scad-genetic-algo", tags=["scad-genetic-algo"])
 api_router.include_router(scad_versions.router, prefix="/scad-versions", tags=["scad-versions"])
 api_router.include_router(assembly.router, tags=["assembly"])
+api_router.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
 

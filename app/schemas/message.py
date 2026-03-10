@@ -4,6 +4,11 @@ from pydantic import BaseModel, field_validator
 from app.schemas.common import Timestamped
 
 
+class ImageData(BaseModel):
+    data: str  # base64-encoded image data
+    media_type: str = "image/jpeg"  # image/jpeg, image/png, image/webp, image/gif
+
+
 class MessageCreate(BaseModel):
     chat_id: str
     role: str
@@ -11,6 +16,10 @@ class MessageCreate(BaseModel):
     tokens: int | None = None
     metadata_json: dict | None = None
     openscad_code: str | dict | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_thinking: bool = True
+    images: list[ImageData] | None = None
 
     @field_validator('metadata_json', mode='before')
     @classmethod

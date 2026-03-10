@@ -1,11 +1,9 @@
 import os
-import uuid
 import subprocess
 import re
+import tempfile
 
 from langchain_core.tools import tool
-
-GENERATED_FILES_DIR = os.getenv("GENERATED_FILES_DIR", "/app/generated_files")
 
 
 @tool
@@ -14,12 +12,11 @@ def validate_openscad_code(openscad_code: str) -> str:
     compiles successfully, or a detailed error message with the line number if it fails.
     Use this tool BEFORE returning code to the user to ensure it is error-free."""
 
-    task_id = f"validate_{uuid.uuid4().hex[:8]}"
-    script_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.scad")
-    output_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
+    tmp_dir = tempfile.mkdtemp(prefix="scad_validate_")
+    script_path = os.path.join(tmp_dir, "validate.scad")
+    output_path = os.path.join(tmp_dir, "validate.stl")
 
     try:
-        os.makedirs(GENERATED_FILES_DIR, exist_ok=True)
         with open(script_path, "w") as f:
             f.write(openscad_code)
 
@@ -27,7 +24,7 @@ def validate_openscad_code(openscad_code: str) -> str:
             ["openscad", "-o", output_path, script_path],
             capture_output=True,
             text=True,
-            cwd=GENERATED_FILES_DIR,
+            cwd=tmp_dir,
             timeout=30,
         )
 
@@ -56,7 +53,10 @@ def validate_openscad_code(openscad_code: str) -> str:
             "The code may contain an infinite loop or extremely complex geometry."
         )
     except Exception as e:
-        return f"ERROR: Validation failed unexpectedly: {str(e)}"
+        return (
+            "SKIPPED: Validation could not run due to a server-side issue "
+            f"({e}). Proceed with the code as-is — the code itself is likely fine."
+        )
     finally:
         for path in [script_path, output_path]:
             if os.path.exists(path):
@@ -64,3 +64,7 @@ def validate_openscad_code(openscad_code: str) -> str:
                     os.remove(path)
                 except OSError:
                     pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass

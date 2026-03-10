@@ -35,6 +35,13 @@ from app.schemas.message import MessageRead
 from app.schemas.runpod import ChatRunpodRequest, ChatRunpodResponse
 from app.services.chat_socket import chat_socket_manager
 from app.services.runpod import get_runpod_client
+from app.services.openscad_agent import run_agent_stream
+from app.api.routes.gemini_openscad_generate_route import (
+    _build_lc_history,
+    _save_parts_as_assets,
+    _process_payload_images,
+)
+from app.api.routes.uploads import save_chat_image
 
 router = APIRouter()
 
@@ -731,17 +738,149 @@ async def runpod_chat(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    chat = await db.get(ChatModel, chat_id)
-    if not chat:
+    # Single query: verify chat exists + ownership
+    row = (
+        await db.execute(
+            select(ChatModel, SessionModel.user_id)
+            .join(SessionModel, ChatModel.session_id == SessionModel.id)
+            .where(ChatModel.id == chat_id)
+        )
+    ).one_or_none()
+    if not row:
         raise HTTPException(status_code=404, detail="Chat not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .where(ChatModel.id == chat_id)
-    )
-    if owner and owner != user_id:
+    _, owner_id = row
+    if owner_id and owner_id != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     return await _handle_runpod_request(chat_id=chat_id, payload=payload, db=db)
+
+
+async def _handle_openscad_ws(
+    websocket: WebSocket,
+    chat_id: str,
+    payload: dict,
+) -> None:
+    """Handle OpenSCAD generation request over WebSocket with token streaming."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    content = payload.get("content", "")
+    images = payload.get("images")  # list of {data, media_type}
+    options = payload.get("options", {})
+
+    try:
+        async with SessionLocal() as db:
+            # 1. Process images
+            base64_urls: list[str] = []
+            persistent_urls: list[str] = []
+            if images:
+                for img in images[:4]:
+                    filename = save_chat_image(img["data"], img["media_type"])
+                    base64_urls.append(f"data:{img['media_type']};base64,{img['data']}")
+                    persistent_urls.append(f"/uploads/chat-images/{filename}")
+
+            # 2. Save user message
+            user_meta = {"images": persistent_urls} if persistent_urls else None
+            user_msg = MessageModel(
+                chat_id=chat_id,
+                role="user",
+                content=content,
+                metadata_json=user_meta,
+            )
+            db.add(user_msg)
+            await db.commit()
+
+            # 3. Build history
+            history = await _build_lc_history(db, chat_id)
+
+            # 4. Get chat session_id for asset saving
+            chat_obj = await db.get(ChatModel, chat_id)
+            chat_session_id = chat_obj.session_id if chat_obj else None
+
+            # 5. Stream tokens
+            final_data = None
+            async for event in run_agent_stream(
+                content,
+                history,
+                image_data_urls=base64_urls or None,
+                provider=options.get("llm_provider"),
+                model=options.get("llm_model"),
+                thinking=options.get("llm_thinking", False),
+            ):
+                if event["type"] == "token":
+                    await websocket.send_json({
+                        "type": "openscad.token",
+                        "chat_id": chat_id,
+                        "text": event["text"],
+                    })
+                elif event["type"] == "done":
+                    final_data = event["data"]
+                elif event["type"] == "error":
+                    await websocket.send_json({
+                        "type": "openscad.error",
+                        "chat_id": chat_id,
+                        "message": event["message"],
+                    })
+                    return
+
+            # 6. Persist assistant message and send done event
+            if final_data:
+                code = final_data.get("openscad_code", "")
+                parameters = final_data.get("parameters", [])
+                model_type = final_data.get("model_type", "chat")
+                message = final_data.get("message", "Model generated." if code else "Here to help!")
+
+                ai_msg = MessageModel(
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=message,
+                    metadata_json={
+                        "openscad_code": code,
+                        "parameters": parameters,
+                        "model_type": model_type,
+                        "message": message,
+                    },
+                )
+                db.add(ai_msg)
+                await db.commit()
+                await db.refresh(ai_msg)
+                ai_msg_id = str(ai_msg.id)
+
+                # Auto-save parts
+                if code and chat_session_id:
+                    try:
+                        await _save_parts_as_assets(
+                            db=db,
+                            session_id=chat_session_id,
+                            code=code,
+                            model_type=model_type,
+                            message=message,
+                        )
+                    except Exception:
+                        logger.exception("Part auto-save failed (non-critical)")
+
+                await websocket.send_json({
+                    "type": "openscad.done",
+                    "chat_id": chat_id,
+                    "data": {
+                        "id": ai_msg_id,
+                        "openscad_code": code,
+                        "parameters": parameters,
+                        "model_type": model_type,
+                        "message": message,
+                    },
+                })
+
+    except Exception as e:
+        logger.exception(f"OpenSCAD WS handler error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "openscad.error",
+                "chat_id": chat_id,
+                "message": str(e),
+            })
+        except Exception:
+            pass
 
 
 @router.websocket("/chat-socket/{chat_id}")
@@ -762,16 +901,19 @@ async def chat_socket(
     user_id = str(user["id"])
 
     async with SessionLocal() as db:
-        chat = await db.get(ChatModel, chat_id)
-        if not chat:
+        # Single query: verify chat exists + ownership
+        row = (
+            await db.execute(
+                select(ChatModel, SessionModel.user_id)
+                .join(SessionModel, ChatModel.session_id == SessionModel.id)
+                .where(ChatModel.id == chat_id)
+            )
+        ).one_or_none()
+        if not row:
             await websocket.close(code=1008)
             return
-        owner = await db.scalar(
-            select(SessionModel.user_id)
-            .join(ChatModel, ChatModel.session_id == SessionModel.id)
-            .where(ChatModel.id == chat_id)
-        )
-        if owner and owner != user_id:
+        _, owner_id = row
+        if owner_id and owner_id != user_id:
             await websocket.close(code=1008)
             return
 
@@ -794,7 +936,16 @@ async def chat_socket(
                 continue
             if not isinstance(payload, dict):
                 continue
-            if payload.get("type") != "runpod.request":
+
+            msg_type = payload.get("type")
+
+            # Handle OpenSCAD generation requests
+            if msg_type == "openscad.request":
+                asyncio.create_task(_handle_openscad_ws(websocket, chat_id, payload))
+                continue
+
+            # Handle RunPod requests
+            if msg_type != "runpod.request":
                 continue
             request_payload = payload.get("payload") or {}
             try:

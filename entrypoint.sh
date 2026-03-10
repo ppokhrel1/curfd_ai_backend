@@ -22,4 +22,4 @@ while [ $COUNT -lt $MAX_RETRIES ]; do
 done
 
 # Start the actual FastAPI server
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-exclude "generated_files/*"

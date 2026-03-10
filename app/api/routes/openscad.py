@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 from app.core.task_manager import task_manager
 
 # Import the generate_openscad task we just created
-from app.cadquery.tasks import generate_openscad
+from app.cadquery.tasks import generate_openscad, convert_step_file, GENERATED_FILES_DIR
 
 router = APIRouter()
 
 class OpenScadGenerateRequest(BaseModel):
     script: str
-    # OpenSCAD supported export formats; GLB triggers multi-part ZIP compilation
-    format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG", "GLB"] = "STL"
+    # OpenSCAD supported export formats; GLB triggers multi-part ZIP compilation; STEP converts via CadQuery
+    format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG", "GLB", "STEP"] = "STL"
 
 @router.post("/generate")
 async def generate_openscad_model(request: OpenScadGenerateRequest):
@@ -35,7 +35,7 @@ async def generate_openscad_model(request: OpenScadGenerateRequest):
 @router.post("/upload")
 async def upload_openscad_script(
     file: UploadFile = File(...),
-    output_format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG", "GLB"] = Form("STL"),
+    output_format: Literal["STL", "OFF", "AMF", "3MF", "CSG", "DXF", "SVG", "GLB", "STEP"] = Form("STL"),
 ):
     """
     Upload an OpenSCAD (.scad) script file for generation.
@@ -56,6 +56,33 @@ async def upload_openscad_script(
         return {"task_id": task_id, "status": "processing"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@router.post("/import-step")
+async def import_step_file(
+    file: UploadFile = File(...),
+    output_format: Literal["GLB", "STL"] = Form("GLB"),
+):
+    """
+    Upload a STEP file and convert it to a displayable format (GLB or STL).
+    """
+    if not file.filename or not file.filename.lower().endswith((".step", ".stp")):
+        raise HTTPException(status_code=400, detail="Please upload a valid STEP file (.step or .stp)")
+
+    try:
+        content = await file.read()
+        import uuid as _uuid
+        task_id = str(_uuid.uuid4())
+        step_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.step")
+        with open(step_path, "wb") as f:
+            f.write(content)
+
+        submitted_task_id = task_manager.submit_task(
+            convert_step_file, step_path, output_format
+        )
+        return {"task_id": submitted_task_id, "status": "processing"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"STEP import failed: {str(e)}")
+
 
 @router.websocket("/ws/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
@@ -103,7 +130,7 @@ async def download_file(filename: str, background_tasks: BackgroundTasks):
     """
     Download a generated OpenSCAD output file and delete it afterward.
     """
-    file_path = os.path.join(os.getenv("GENERATED_FILES_DIR", "/app/generated_files"), filename)
+    file_path = os.path.join(GENERATED_FILES_DIR, filename)
 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")

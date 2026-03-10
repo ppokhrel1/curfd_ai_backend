@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
+from app.core.ownership import get_chat_verified, get_message_verified
 from app.db.session import get_db
 from app.models.chat import Chat as ChatModel
 from app.models.message import Message as MessageModel
@@ -24,18 +25,8 @@ async def create_message(
     user_id: str = Depends(get_current_user_id),
 ):
     logger.info(f"User {user_id} creating message for chat {payload.chat_id}")
-    chat = await db.get(ChatModel, payload.chat_id)
-    if not chat:
-        logger.warning(f"Chat not found: {payload.chat_id}")
-        raise HTTPException(status_code=404, detail="Chat not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .where(ChatModel.id == payload.chat_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from accessing chat {payload.chat_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # Single query: verify chat exists + ownership
+    await get_chat_verified(db, payload.chat_id, user_id)
     message = MessageModel(
         chat_id=payload.chat_id,
         role=payload.role,
@@ -86,19 +77,7 @@ async def get_message(
     user_id: str = Depends(get_current_user_id),
 ):
     logger.info(f"User {user_id} getting message {message_id}")
-    message = await db.get(MessageModel, message_id)
-    if not message:
-        logger.warning(f"Message not found: {message_id}")
-        raise HTTPException(status_code=404, detail="Message not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .join(MessageModel, MessageModel.chat_id == ChatModel.id)
-        .where(MessageModel.id == message_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from accessing message {message_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
+    message = await get_message_verified(db, message_id, user_id)
     return MessageRead.model_validate(message)
 
 
@@ -109,19 +88,7 @@ async def delete_message(
     user_id: str = Depends(get_current_user_id),
 ):
     logger.info(f"User {user_id} deleting message {message_id}")
-    message = await db.get(MessageModel, message_id)
-    if not message:
-        logger.warning(f"Message not found: {message_id}")
-        raise HTTPException(status_code=404, detail="Message not found")
-    owner = await db.scalar(
-        select(SessionModel.user_id)
-        .join(ChatModel, ChatModel.session_id == SessionModel.id)
-        .join(MessageModel, MessageModel.chat_id == ChatModel.id)
-        .where(MessageModel.id == message_id)
-    )
-    if owner and owner != user_id:
-        logger.warning(f"User {user_id} forbidden from deleting message {message_id}")
-        raise HTTPException(status_code=403, detail="Forbidden")
+    message = await get_message_verified(db, message_id, user_id)
     await db.delete(message)
     await db.commit()
     logger.info(f"Message {message_id} deleted by user {user_id}")

@@ -6,8 +6,8 @@ import subprocess
 import tempfile
 import traceback
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -24,7 +24,9 @@ from app.models.job import Job as JobModel
 from app.models.message import Message as MessageModel
 from app.schemas.message import MessageCreate, MessageRead
 from app.schemas.openscad import OpenSCADResponse
-from app.services.openscad_agent import run_agent
+from app.services.openscad_agent import run_agent, run_agent_stream
+from app.api.routes.uploads import save_chat_image
+from app.cadquery.tasks import _strip_toplevel_calls, _clean_scad
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,24 @@ async def _save_parts_as_assets(
     except Exception as e:
         logger.error(f"Failed to save parts as assets: {e}", exc_info=True)
 
+# ── Image helpers ─────────────────────────────────────────────────────────────
+
+def _process_payload_images(payload) -> tuple[list[str], list[str]]:
+    """Save payload images to disk. Returns (base64_data_urls, persistent_urls)."""
+    if not payload.images:
+        return [], []
+
+    base64_data_urls = []
+    persistent_urls = []
+    for img in payload.images[:4]:  # max 4 images
+        filename = save_chat_image(img.data, img.media_type)
+        base64_data_urls.append(f"data:{img.media_type};base64,{img.data}")
+        persistent_urls.append(f"/uploads/chat-images/{filename}")
+
+    logger.info(f"[IMAGES] Processed {len(persistent_urls)} images")
+    return base64_data_urls, persistent_urls
+
+
 # ── History builder ───────────────────────────────────────────────────────────
 
 async def _build_lc_history(db: AsyncSession, chat_id: str) -> list:
@@ -148,7 +168,12 @@ async def _build_lc_history(db: AsyncSession, chat_id: str) -> list:
     lc_messages = []
     for msg in records:
         if msg.role == "user":
-            lc_messages.append(HumanMessage(content=msg.content))
+            text = msg.content or ""
+            # Note if images were attached (don't re-send actual images)
+            meta = msg.metadata_json
+            if isinstance(meta, dict) and meta.get("images"):
+                text += "\n[User attached image(s)]"
+            lc_messages.append(HumanMessage(content=text))
         elif msg.role == "assistant":
             meta = msg.metadata_json
             if isinstance(meta, str):
@@ -205,8 +230,15 @@ async def gemini_openscad_generate_route(
     chat_session_id = chat.session_id
 
     try:
-        # 1. Save user message first
-        db.add(MessageModel(chat_id=payload.chat_id, role="user", content=payload.content))
+        # 1. Process images if present
+        base64_urls, persistent_urls = _process_payload_images(payload)
+
+        # Save user message with image metadata
+        user_meta = {"images": persistent_urls} if persistent_urls else None
+        db.add(MessageModel(
+            chat_id=payload.chat_id, role="user", content=payload.content,
+            metadata_json=user_meta,
+        ))
         await db.commit()
 
         # 2. Build smart history (includes previous OpenSCAD code for iterative refinement)
@@ -216,6 +248,10 @@ async def gemini_openscad_generate_route(
         response: OpenSCADResponse = await run_agent(
             user_input=payload.content,
             history=history,
+            image_data_urls=base64_urls or None,
+            provider=payload.llm_provider,
+            model=payload.llm_model,
+            thinking=payload.llm_thinking,
         )
 
         # 4. Extract fields (already validated by schema)
@@ -252,6 +288,9 @@ async def gemini_openscad_generate_route(
                 )
             except Exception:
                 logger.exception("Part auto-save failed (non-critical)")
+            # _save_parts_as_assets calls db.commit() which expires ai_msg;
+            # refresh so FastAPI can serialize it
+            await db.refresh(ai_msg)
 
         return ai_msg
 
@@ -260,14 +299,120 @@ async def gemini_openscad_generate_route(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── SSE Streaming Route ──────────────────────────────────────────────────────
+
+@router.post("/process_requirements/stream")
+async def stream_openscad_generate(
+    payload: MessageCreate,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id_async),
+):
+    """SSE streaming endpoint — single LLM call, tokens streamed in real time."""
+    stmt = (
+        select(ChatModel)
+        .options(selectinload(ChatModel.session))
+        .where(ChatModel.id == payload.chat_id)
+    )
+    result = await db.execute(stmt)
+    chat = result.scalar_one_or_none()
+
+    if not chat or (chat.session and user_id and chat.session.user_id != user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    chat_session_id = chat.session_id
+
+    # Process images if present
+    base64_urls, persistent_urls = _process_payload_images(payload)
+
+    # Save user message with image metadata
+    user_meta = {"images": persistent_urls} if persistent_urls else None
+    db.add(MessageModel(
+        chat_id=payload.chat_id, role="user", content=payload.content,
+        metadata_json=user_meta,
+    ))
+    await db.commit()
+
+    # Build history
+    history = await _build_lc_history(db, payload.chat_id)
+
+    async def event_generator():
+        try:
+            final_data = None
+            async for event in run_agent_stream(
+                payload.content, history,
+                image_data_urls=base64_urls or None,
+                provider=payload.llm_provider,
+                model=payload.llm_model,
+                thinking=payload.llm_thinking,
+            ):
+                if event["type"] == "token":
+                    yield f"event: token\ndata: {json.dumps({'text': event['text']})}\n\n"
+                elif event["type"] == "done":
+                    final_data = event["data"]
+                elif event["type"] == "error":
+                    yield f"event: error\ndata: {json.dumps({'message': event['message']})}\n\n"
+                    return
+
+            if final_data:
+                code = final_data.get("openscad_code", "")
+                parameters = final_data.get("parameters", [])
+                model_type = final_data.get("model_type", "chat")
+                message = final_data.get("message", "Model generated." if code else "Here to help!")
+
+                # Persist assistant message
+                ai_msg = MessageModel(
+                    chat_id=payload.chat_id,
+                    role="assistant",
+                    content=message,
+                    metadata_json={
+                        "openscad_code": code,
+                        "parameters": parameters,
+                        "model_type": model_type,
+                        "message": message,
+                    },
+                )
+                db.add(ai_msg)
+                await db.commit()
+                await db.refresh(ai_msg)
+
+                # Capture ID before any further commits expire the ORM object
+                ai_msg_id = str(ai_msg.id)
+
+                # Auto-save parts as searchable assets (preserves parts functionality)
+                if code:
+                    try:
+                        await _save_parts_as_assets(
+                            db=db,
+                            session_id=chat_session_id,
+                            code=code,
+                            model_type=model_type,
+                            message=message,
+                        )
+                    except Exception:
+                        logger.exception("Part auto-save failed (non-critical)")
+
+                # Send final done event with structured data
+                yield f"event: done\ndata: {json.dumps({'id': ai_msg_id, 'openscad_code': code, 'parameters': parameters, 'model_type': model_type, 'message': message})}\n\n"
+
+        except Exception as e:
+            logger.exception("SSE streaming error")
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ── Compile single part ──────────────────────────────────────────────────────
 
 class CompilePartRequest(BaseModel):
     asset_id: str
-
-
-# Pattern to strip bare top-level calls like main();
-_TOP_CALL_RE = re.compile(r"^\s*[a-zA-Z_]\w*\s*\(\s*\)\s*;\s*$", re.MULTILINE)
 
 
 @router.post("/compile-part")
@@ -311,9 +456,11 @@ async def compile_part(
         raise HTTPException(status_code=400, detail="Parent model has no SCAD code")
 
     # 3. Compile just this module
-    # Strip bare top-level calls (main(); etc.) and append our module call
-    base_script = _TOP_CALL_RE.sub("", scad_code)
+    scad_code = _clean_scad(scad_code)  # Strip markdown fences/language tags
+    base_script = _strip_toplevel_calls(scad_code)
     module_script = base_script + f"\n{module_name}();\n"
+
+    logger.info(f"[compile-part] module={module_name}, script length={len(module_script)}")
 
     tmp_dir = tempfile.mkdtemp(prefix="scad_part_")
     scad_path = os.path.join(tmp_dir, "part.scad")

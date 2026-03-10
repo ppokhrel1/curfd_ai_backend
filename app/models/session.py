@@ -11,7 +11,7 @@ from app.models.mixins import TimestampMixin, UUIDMixin, utc_now
 class Session(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "sessions"
 
-    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="active")
     last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

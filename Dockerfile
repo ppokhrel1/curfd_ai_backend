@@ -72,4 +72,4 @@ WORKDIR /code
 # -------- Entry Point --------
 # This CMD is run from /code, allowing 'src.app.main:app' to be resolved.
 # NOTE: Render requires port 10000 for web services. Change 8000 to 10000 if deploying there.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload", "--reload-exclude", "generated_files/*"]

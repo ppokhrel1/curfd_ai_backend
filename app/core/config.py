@@ -50,15 +50,17 @@ class Settings(BaseSettings):
     react_app_stripe_publishable_key: str | None = None
 
     gemini_api_key: str | None = None
+    groq_api_key: str | None = None
     hf_token: str | None = None
     replicate_api_token: str | None = None
 
     # LLM provider configuration
-    llm_provider: str = "gemini"  # "gemini" | "openai" | "anthropic"
+    llm_provider: str = "anthropic"  # "groq" | "gemini" | "openai" | "anthropic" | "openrouter"
     llm_model: str | None = None  # Override model name, or use provider default
     llm_temperature: float = 0.2
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    openrouter_api_key: str | None = None
 
     # Agent configuration
     agent_max_iterations: int = 5
