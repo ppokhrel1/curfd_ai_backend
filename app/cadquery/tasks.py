@@ -237,7 +237,7 @@ def _generate_multipart_zip(task_id: str, script_content: str) -> str:
 
     if modules:
         # Compile all modules in parallel (up to 4 concurrent OpenSCAD processes)
-        max_workers = min(len(modules), 2)
+        max_workers = 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(_compile_single_module, task_id, base_script, mod): mod
