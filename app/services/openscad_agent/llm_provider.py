@@ -76,9 +76,9 @@ def get_llm(
                 supports_thinking = hasattr(ChatAnthropic, "model_fields") and "thinking" in ChatAnthropic.model_fields
 
             if supports_thinking:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 3_000}
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 5_000}
             else:
-                kwargs["model_kwargs"] = {"thinking": {"type": "enabled", "budget_tokens": 3_000}}
+                kwargs["model_kwargs"] = {"thinking": {"type": "enabled", "budget_tokens": 5_000}}
                 logger.warning("[LLM] Old langchain-anthropic — using model_kwargs for thinking. Run: pip install 'langchain-anthropic>=0.3' --upgrade")
             kwargs["max_tokens"] = 16_000
             kwargs["temperature"] = 1
