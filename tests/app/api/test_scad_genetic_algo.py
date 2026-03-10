@@ -125,72 +125,29 @@ async def test_start_job_worker_unreachable(test_client, mock_db_session, mock_h
     assert added_job.status == "Failed"
 
 
-# --- Tests for GET /status/{job_id} ---
+# --- Tests for GET /list/{chat_id} ---
 
 @pytest.mark.asyncio
-async def test_check_status_already_completed(test_client, mock_db_session, mock_httpx_client):
-    # Use helper to generate a fully valid response model
+async def test_list_jobs_returns_results(test_client, mock_db_session):
     mock_job = create_mock_job(status="Completed")
-    mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_job
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [mock_job]
+    mock_db_session.execute.return_value = mock_result
 
-    response = await test_client.get("/optimization/status/job-123")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "Completed"
-    mock_httpx_client.get.assert_not_called()
-
-@pytest.mark.asyncio
-async def test_check_status_polling_completed(test_client, mock_db_session, mock_httpx_client):
-    mock_job = create_mock_job(status="Processing")
-    mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_job
-
-    worker_resp_json = {
-        "status": "Completed",
-        "result": {
-            "optimized_parameters": {"x": 5.0},
-            "fitness_score": 0.99,
-            "result_url": "https://b2.backblaze.com/file.stl"
-        }
-    }
-    mock_httpx_client.get.return_value = httpx.Response(
-        status_code=200, 
-        json=worker_resp_json,
-        request=httpx.Request("GET", "http://dummy")
-    )
-
-    response = await test_client.get("/optimization/status/job-123")
+    response = await test_client.get("/optimization/list/chat-123")
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "Completed"
-    assert data["fitness_score"] == 0.99
-    assert data["result_url"] == "https://b2.backblaze.com/file.stl"
-    mock_db_session.commit.assert_called_once()
+    assert len(data) == 1
+    assert data[0]["status"] == "Completed"
 
 @pytest.mark.asyncio
-async def test_check_status_worker_failed(test_client, mock_db_session, mock_httpx_client):
-    mock_job = create_mock_job(status="Processing")
-    mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_job
+async def test_list_jobs_empty(test_client, mock_db_session):
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = mock_result
 
-    mock_httpx_client.get.return_value = httpx.Response(
-        status_code=500, 
-        json={"detail": "Compilation failed"},
-        request=httpx.Request("GET", "http://dummy")
-    )
+    response = await test_client.get("/optimization/list/chat-123")
 
-    response = await test_client.get("/optimization/status/job-123")
-
-    assert response.status_code == 200 
-    data = response.json()
-    assert data["status"] == "Failed"
-    assert "Compilation failed" in data["error"]
-
-@pytest.mark.asyncio
-async def test_check_status_missing_worker_id(test_client, mock_db_session):
-    mock_job = create_mock_job(status="Processing", worker_task_id=None)
-    mock_db_session.execute.return_value.scalar_one_or_none.return_value = mock_job
-
-    response = await test_client.get("/optimization/status/job-123")
-
-    assert response.status_code == 500
-    assert "No worker task ID" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json() == []

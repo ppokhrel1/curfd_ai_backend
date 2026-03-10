@@ -85,9 +85,12 @@ async def test_process_requirements_success(mock_run_agent, client, mock_db_sess
     assert data["content"] == "Created a simple cube"
 
     # Verify DB interactions
-    assert mock_db_session.add.call_count == 2
-    assert mock_db_session.commit.call_count == 2
-    assert mock_db_session.refresh.call_count == 1
+    # add: user message + assistant message + (parts assets via _save_parts_as_assets)
+    assert mock_db_session.add.call_count >= 2
+    # commit: user message + assistant message + (parts commit)
+    assert mock_db_session.commit.call_count >= 2
+    # refresh: after assistant commit + after _save_parts_as_assets commit (expires ORM obj)
+    assert mock_db_session.refresh.call_count == 2
 
 @pytest.mark.asyncio
 async def test_process_requirements_chat_not_found(client, mock_db_session):

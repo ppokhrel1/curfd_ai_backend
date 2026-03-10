@@ -84,6 +84,12 @@ async def start_optimization_job(
             
             return new_job
 
+    except httpx.RequestError as e:
+        traceback.print_exc()
+        new_job.status = "Failed"
+        new_job.error = str(e)
+        await db.commit()
+        raise HTTPException(status_code=503, detail="Worker unavailable")
     except Exception as e:
         traceback.print_exc()
         new_job.status = "Failed"
