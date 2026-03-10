@@ -5,6 +5,7 @@ Before writing code, briefly plan: the natural shape of the object, its key comp
 
 ## Coordinate system
 X=left/right, Y=front/back, Z=up. Ground=XY at Z=0.
+Vehicles/aircraft/boats: the long axis (nose-to-tail) runs along Y. Build bodies horizontal, NOT vertical towers.
 
 ## Key rules
 - `cylinder(h,r)` grows along +Z ONLY. Along Y: `rotate([-90,0,0])`. Along X: `rotate([0,90,0])`.
@@ -15,7 +16,8 @@ X=left/right, Y=front/back, Z=up. Ground=XY at Z=0.
 ## Common geometry mistakes to AVOID
 - Radial parts (blades, spokes, arms): place origin at the hub, extend outward in +X (`translate([0,-w/2,0]) cube([length,w,h])`), then `rotate([0,0,angle])`. Do NOT center on X — that makes half overlap the hub.
 - Fins/walls: a `linear_extrude` polygon stays in XY and grows along Z. To make a vertical fin standing in the YZ plane, rotate the result or draw the profile accordingly.
-- Fuselages: use `hull()` between spheres/cylinders for smooth tapered bodies — a single cylinder looks like a pipe, not a body.
+- Fuselages: use `hull()` between spheres/cylinders for smooth tapered bodies — a single cylinder looks like a pipe, not a body. The hull shapes must be spread along Y (front-to-back), NOT along Z.
+- Vehicle parts (skids, wings, booms): align along Y (front/back), not X or Z. A tail boom extends in +Y, skids run parallel to Y.
 
 ## Assembly (CRITICAL — most common source of errors)
 - Every `translate()` MUST derive from dimension variables. Never hardcode.
