@@ -64,7 +64,11 @@ def _get_components(provider: str | None = None, model: str | None = None, think
     resolved_provider = (provider or settings.llm_provider).lower()
 
     generate_chain = _generate_prompt | llm
-    structured_llm = llm.with_structured_output(OpenSCADResponse)
+
+    # Structured output is incompatible with thinking mode (forced tool calling),
+    # so use a separate non-thinking LLM for extraction.
+    extraction_llm = get_llm(provider, model, False) if thinking else llm
+    structured_llm = extraction_llm.with_structured_output(OpenSCADResponse)
     extraction_chain = _extraction_prompt | structured_llm
 
     tools_supported = resolved_provider not in ("groq",)
