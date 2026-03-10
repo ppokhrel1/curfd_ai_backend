@@ -337,6 +337,8 @@ async def stream_openscad_generate(
             ):
                 if event["type"] == "token":
                     yield f"event: token\ndata: {json.dumps({'text': event['text']})}\n\n"
+                elif event["type"] == "tool":
+                    yield f"event: tool\ndata: {json.dumps({'tool_name': event['tool_name'], 'status': event['status']})}\n\n"
                 elif event["type"] == "done":
                     final_data = event["data"]
                 elif event["type"] == "error":

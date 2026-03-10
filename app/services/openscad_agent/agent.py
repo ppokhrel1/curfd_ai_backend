@@ -13,6 +13,8 @@ from app.services.openscad_agent.tools import (
     validate_openscad_code,
     analyze_openscad_parameters,
     search_openscad_reference,
+    apply_parameter_changes,
+    build_parametric_model,
 )
 from app.schemas.openscad import OpenSCADResponse
 from app.core.config import settings
@@ -20,7 +22,13 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 # Tools (stateless, safe at module level)
-_tools = [validate_openscad_code, analyze_openscad_parameters, search_openscad_reference]
+_tools = [
+    validate_openscad_code,
+    analyze_openscad_parameters,
+    search_openscad_reference,
+    apply_parameter_changes,
+    build_parametric_model,
+]
 _tools_by_name = {t.name: t for t in _tools}
 
 # Prompts (stateless templates, safe at module level)
@@ -309,6 +317,15 @@ def _extract_from_text(text: str) -> dict:
     code_match = _CODE_BLOCK_RE.search(text)
     code = code_match.group(1).strip() if code_match else ""
 
+    # Fallback: check for sentinel-delimited patched code from apply_parameter_changes
+    if not code:
+        patched_match = re.search(
+            r"---PATCHED_CODE_START---\n(.*?)\n---PATCHED_CODE_END---",
+            text, re.DOTALL,
+        )
+        if patched_match:
+            code = patched_match.group(1).strip()
+
     if code:
         code = _clean_scad(code)
 
@@ -346,47 +363,83 @@ async def run_agent_stream(
     thinking: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """
-    Single LLM call with token streaming.
+    LLM streaming with tool call support.
     Yields: {"type": "token", "text": "..."} for each text token
+    Yields: {"type": "tool", "tool_name": ..., "status": ...} when a tool executes
     Yields: {"type": "done", "data": {...}} at the end with extracted structured data
-    Filters out thinking/reasoning blocks — only streams visible text.
     """
     c = _get_components(provider, model, thinking)
     logger.info(f"[STREAM] provider={c['provider']}, model={model}, thinking={thinking}, images={len(image_data_urls or [])}")
+
+    human_msg = _build_human_message(user_input, image_data_urls)
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(history) + [human_msg]
+
+    use_tools = (
+        not image_data_urls
+        and c["tools_supported"]
+        and c["llm_with_tools"] is not None
+    )
+
     full_text = ""
-    thinking_seen = False
 
-    # Choose streaming source: direct LLM for multimodal, chain for text-only
-    if image_data_urls:
-        human_msg = _build_human_message(user_input, image_data_urls)
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(history) + [human_msg]
-        stream_source = c["llm"].astream(messages)
-    else:
-        stream_source = c["generate_chain"].astream(
-            {"input": user_input, "history": history}
-        )
+    for _iteration in range(settings.agent_max_iterations):
+        collected_response = None
 
-    try:
-        async for chunk in stream_source:
-            # Log raw chunk type for first few chunks to debug thinking
-            content = chunk.content if hasattr(chunk, "content") else chunk
-            if isinstance(content, list) and not thinking_seen:
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "thinking":
-                        thinking_seen = True
-                        logger.info("[STREAM] Thinking block detected in stream!")
-                        break
+        if use_tools:
+            stream_source = c["llm_with_tools"].astream(messages)
+        elif image_data_urls:
+            stream_source = c["llm"].astream(messages)
+        else:
+            stream_source = c["generate_chain"].astream(
+                {"input": user_input, "history": history}
+            )
 
-            token = _extract_text_content(chunk)
-            if token:
-                full_text += token
-                yield {"type": "token", "text": token}
-    except Exception as e:
-        logger.error(f"Streaming generation failed: {e}", exc_info=True)
-        yield {"type": "error", "message": str(e)}
-        return
+        try:
+            async for chunk in stream_source:
+                # Accumulate full response for tool call detection
+                if use_tools:
+                    collected_response = chunk if collected_response is None else collected_response + chunk
 
-    logger.info(f"[STREAM] Complete, length={len(full_text)}, thinking_seen={thinking_seen}")
+                token = _extract_text_content(chunk)
+                if token:
+                    full_text += token
+                    yield {"type": "token", "text": token}
+        except Exception as e:
+            logger.error(f"Streaming generation failed: {e}", exc_info=True)
+            yield {"type": "error", "message": str(e)}
+            return
+
+        # Check for tool calls
+        if (
+            use_tools
+            and collected_response
+            and hasattr(collected_response, "tool_calls")
+            and collected_response.tool_calls
+        ):
+            messages.append(collected_response)
+            for tool_call in collected_response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_id = tool_call.get("id", tool_name)
+                tool_fn = _tools_by_name.get(tool_name)
+
+                if tool_fn is None:
+                    tool_result = f"Unknown tool: {tool_name}"
+                else:
+                    try:
+                        tool_result = await tool_fn.ainvoke(tool_args)
+                    except Exception as e:
+                        tool_result = f"Tool error: {e}"
+
+                logger.info(f"[STREAM] Tool {tool_name} returned: {str(tool_result)[:200]}")
+                yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
+                messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_id))
+            # Loop to get LLM's next response after tool execution
+            continue
+        else:
+            break
+
+    logger.info(f"[STREAM] Complete, length={len(full_text)}")
 
     response = _extract_from_text(full_text)
     yield {"type": "done", "data": response}

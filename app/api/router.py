@@ -10,6 +10,7 @@ from app.api.routes import (
     health,
     jobs,
     messages,
+    prompts,
     scad_genetic_algo,
     scad_versions,
     sessions,
@@ -37,4 +38,5 @@ api_router.include_router(scad_genetic_algo.router, prefix="/scad-genetic-algo",
 api_router.include_router(scad_versions.router, prefix="/scad-versions", tags=["scad-versions"])
 api_router.include_router(assembly.router, tags=["assembly"])
 api_router.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
+api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
 

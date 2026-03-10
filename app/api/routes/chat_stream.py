@@ -813,6 +813,13 @@ async def _handle_openscad_ws(
                         "chat_id": chat_id,
                         "text": event["text"],
                     })
+                elif event["type"] == "tool":
+                    await websocket.send_json({
+                        "type": "openscad.tool",
+                        "chat_id": chat_id,
+                        "tool_name": event["tool_name"],
+                        "status": event["status"],
+                    })
                 elif event["type"] == "done":
                     final_data = event["data"]
                 elif event["type"] == "error":
