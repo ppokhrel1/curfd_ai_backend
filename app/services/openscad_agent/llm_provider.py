@@ -76,15 +76,16 @@ def get_llm(
                 supports_thinking = hasattr(ChatAnthropic, "model_fields") and "thinking" in ChatAnthropic.model_fields
 
             if supports_thinking:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 5_000}
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8_000}
             else:
-                kwargs["model_kwargs"] = {"thinking": {"type": "enabled", "budget_tokens": 5_000}}
+                kwargs["model_kwargs"] = {"thinking": {"type": "enabled", "budget_tokens": 8_000}}
                 logger.warning("[LLM] Old langchain-anthropic — using model_kwargs for thinking. Run: pip install 'langchain-anthropic>=0.3' --upgrade")
             kwargs["max_tokens"] = 16_000
             kwargs["temperature"] = 1
             logger.info(f"[LLM] Creating Anthropic LLM with THINKING ENABLED: model={model}")
         else:
             kwargs["temperature"] = temperature
+            kwargs["max_tokens"] = 16_000
             logger.info(f"[LLM] Creating Anthropic LLM: model={model}, thinking=OFF")
 
         return ChatAnthropic(**kwargs)
@@ -96,6 +97,7 @@ def get_llm(
             api_key=settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY"),
             base_url="https://openrouter.ai/api/v1",
             temperature=temperature,
+            max_tokens=16_000,
             default_headers={
                 "HTTP-Referer": settings.frontend_url or "https://nooriat.com",
                 "X-Title": "CURFD AI",

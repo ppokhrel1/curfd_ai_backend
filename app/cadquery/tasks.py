@@ -123,7 +123,7 @@ def _run_openscad(
 ) -> subprocess.CompletedProcess:
     cmd = ["openscad"] + _OPENSCAD_EXTRA_FLAGS
     if preview:
-        cmd += ["-D", "$fn=24"]
+        cmd += ["-D", "$fn=12"]
     cmd += ["-o", output_path, script_path]
     return subprocess.run(
         cmd,
@@ -203,80 +203,164 @@ def _compile_single_module(
 
 
 def _strip_toplevel_calls(scad_code: str) -> str:
-    """Remove only top-level (brace-depth 0) bare function calls like `main();`.
-
-    Calls inside module bodies are preserved so modules remain valid.
+    """Remove top-level executable code (bare calls like `main();` and
+    block calls like `union() { ... }`) while preserving variable
+    declarations, module/function definitions, and comments.
     """
-    call_re = re.compile(r'^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\(\s*\)\s*;\s*$')
+    _decl_re = re.compile(
+        r'^\s*(?:'
+        r'module\s+\w|'          # module definition
+        r'function\s+\w|'        # function definition
+        r'\$?\w+\s*='            # variable assignment
+        r')'
+    )
     lines = scad_code.split('\n')
+    out: list[str] = []
     depth = 0
-    out = []
+    in_toplevel_exec = False
+
     for line in lines:
-        # Track brace depth (simple char count — good enough for generated code)
-        for ch in line:
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth = max(0, depth - 1)
-        # Only blank-out calls at depth 0 (top-level)
-        if depth == 0 and call_re.match(line):
-            out.append('')  # blank the line, preserving line count
+        stripped = line.strip()
+
+        if in_toplevel_exec:
+            for ch in line:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+            out.append('')
+            if depth <= 0:
+                in_toplevel_exec = False
+                depth = 0
+            continue
+
+        opens = line.count('{')
+        closes = line.count('}')
+        new_depth = depth + opens - closes
+
+        if depth == 0:
+            if (not stripped
+                    or stripped.startswith('//')
+                    or stripped.startswith('/*')
+                    or stripped.startswith('*')
+                    or stripped.startswith('use ')
+                    or stripped.startswith('include ')
+                    or _decl_re.match(line)):
+                out.append(line)
+                depth = max(0, new_depth)
+            else:
+                # Top-level executable code — strip it
+                out.append('')
+                if new_depth > 0:
+                    in_toplevel_exec = True
+                    depth = new_depth
         else:
+            # Inside a declaration body — keep everything
             out.append(line)
+            depth = max(0, new_depth)
+
     return '\n'.join(out)
 
 
 def _generate_multipart_zip(task_id: str, script_content: str) -> str:
     """
-    Compile the full OpenSCAD model as a single STL with reduced $fn for fast
-    preview, then bundle it into a ZIP.  Individual parts can be compiled
-    on demand via the /compile-part endpoint.
+    Compile each named module as a separate STL with reduced $fn for fast
+    preview, then bundle all parts into a ZIP.  Falls back to compiling the
+    full model as a single STL if no individual modules are found.
     """
-    cache_key = _content_hash(script_content + "GLB_PREVIEW")
-    cached = _cache_get(cache_key, "stl")
+    base_script = _strip_toplevel_calls(script_content)
+    module_names = _extract_module_names(script_content)
 
-    stl_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
+    stl_files: list[tuple[str, str]] = []  # (part_name, stl_path)
 
-    if cached:
-        import shutil
-        shutil.copy2(cached, stl_path)
-        logger.info(f"[multipart] cache hit for full model")
-    else:
-        scad_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.scad")
-        with open(scad_path, "w") as f:
-            f.write(script_content)
-        try:
-            result = _run_openscad(scad_path, stl_path, preview=True)
-            if (
-                result.returncode != 0
-                or not os.path.exists(stl_path)
-                or os.path.getsize(stl_path) <= 84
-            ):
-                logger.error(
-                    f"[multipart] compilation failed. "
-                    f"rc={result.returncode}, stderr={result.stderr[:500]}"
-                )
-                _raise_openscad_error(result.stderr)
-            _cache_put(cache_key, "stl", stl_path)
-            logger.info(f"[multipart] compiled model.stl ({os.path.getsize(stl_path)} bytes)")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(json.dumps({"line": None, "message": "OpenSCAD timed out."}))
-        finally:
-            if os.path.exists(scad_path):
-                os.remove(scad_path)
+    if module_names:
+        logger.info(f"[multipart] found {len(module_names)} modules: {module_names}")
+        for mod_name in module_names:
+            module_script = base_script + f"\n{mod_name}();\n"
+            cache_key = _content_hash(module_script + "PREVIEW")
+            cached = _cache_get(cache_key, "stl")
+            stl_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}_{mod_name}.stl")
+
+            if cached:
+                import shutil
+                shutil.copy2(cached, stl_path)
+                logger.info(f"[multipart] cache hit for {mod_name}")
+                stl_files.append((mod_name, stl_path))
+                continue
+
+            scad_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}_{mod_name}.scad")
+            with open(scad_path, "w") as f:
+                f.write(module_script)
+            try:
+                result = _run_openscad(scad_path, stl_path, preview=True)
+                if (
+                    result.returncode == 0
+                    and os.path.exists(stl_path)
+                    and os.path.getsize(stl_path) > 84
+                ):
+                    _cache_put(cache_key, "stl", stl_path)
+                    logger.info(f"[multipart] compiled {mod_name}.stl ({os.path.getsize(stl_path)} bytes)")
+                    stl_files.append((mod_name, stl_path))
+                else:
+                    stderr_snippet = result.stderr[:300] if result.stderr else "none"
+                    logger.warning(
+                        f"[multipart] {mod_name} produced no geometry "
+                        f"(rc={result.returncode}). stderr: {stderr_snippet}"
+                    )
+            except subprocess.TimeoutExpired:
+                logger.warning(f"[multipart] {mod_name} timed out, skipping")
+            except Exception as e:
+                logger.warning(f"[multipart] {mod_name} failed: {e}")
+            finally:
+                if os.path.exists(scad_path):
+                    os.remove(scad_path)
+
+    # Fallback: compile full model as single part if no modules found or all failed
+    if not stl_files:
+        logger.info("[multipart] no individual parts, compiling full model")
+        cache_key = _content_hash(script_content + "FULL_PREVIEW")
+        cached = _cache_get(cache_key, "stl")
+        stl_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
+
+        if cached:
+            import shutil
+            shutil.copy2(cached, stl_path)
+        else:
+            scad_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.scad")
+            with open(scad_path, "w") as f:
+                f.write(script_content)
+            try:
+                result = _run_openscad(scad_path, stl_path, preview=True)
+                if (
+                    result.returncode != 0
+                    or not os.path.exists(stl_path)
+                    or os.path.getsize(stl_path) <= 84
+                ):
+                    _raise_openscad_error(result.stderr)
+                _cache_put(cache_key, "stl", stl_path)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(json.dumps({"line": None, "message": "OpenSCAD timed out."}))
+            finally:
+                if os.path.exists(scad_path):
+                    os.remove(scad_path)
+
+        stl_files.append(("model", stl_path))
 
     # Bundle into ZIP
     zip_filename = f"{task_id}.zip"
     zip_path = os.path.join(GENERATED_FILES_DIR, zip_filename)
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.write(stl_path, "model.stl")
+        for part_name, part_path in stl_files:
+            zf.write(part_path, f"{part_name}.stl")
 
-    try:
-        os.remove(stl_path)
-    except OSError:
-        pass
+    # Clean up part STLs
+    for _, part_path in stl_files:
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
 
-    logger.info(f"[multipart] created ZIP: {zip_filename}")
+    logger.info(f"[multipart] created ZIP with {len(stl_files)} parts: {zip_filename}")
     return zip_filename
 
 
@@ -284,6 +368,7 @@ def _generate_multipart_zip(task_id: str, script_content: str) -> str:
 def _convert_stl_to_step(stl_path: str, step_path: str) -> None:
     """Convert an STL mesh to STEP solid using CadQuery/OCC."""
     import sys
+    import tempfile
     cad_venv_python = "/app/.venv-cad/bin/python"
     python_executable = cad_venv_python if os.path.exists(cad_venv_python) else sys.executable
 
@@ -292,7 +377,9 @@ import cadquery as cq
 result = cq.importers.importMesh("{stl_path}")
 cq.exporters.export(result, "{step_path}", exportType="STEP")
 """
-    script_path = stl_path + ".convert.py"
+    # Write to /tmp to avoid triggering file watcher reloads
+    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="cq_convert_")
+    os.close(fd)
     with open(script_path, "w") as f:
         f.write(convert_script)
     try:
@@ -311,6 +398,7 @@ cq.exporters.export(result, "{step_path}", exportType="STEP")
 def _convert_step_to_glb(step_path: str, glb_path: str) -> None:
     """Convert a STEP file to GLB using CadQuery/OCC."""
     import sys
+    import tempfile
     cad_venv_python = "/app/.venv-cad/bin/python"
     python_executable = cad_venv_python if os.path.exists(cad_venv_python) else sys.executable
 
@@ -320,7 +408,8 @@ result = cq.importers.importStep("{step_path}")
 assy = cq.Assembly(result, name="Part")
 assy.save("{glb_path}", exportType="GLB")
 """
-    script_path = step_path + ".convert.py"
+    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="cq_convert_")
+    os.close(fd)
     with open(script_path, "w") as f:
         f.write(convert_script)
     try:
@@ -347,6 +436,7 @@ def convert_step_file(task_id: str, step_path: str, output_format: str = "GLB") 
         _convert_step_to_glb(step_path, output_path)
     elif fmt == "STL":
         import sys
+        import tempfile
         cad_venv_python = "/app/.venv-cad/bin/python"
         python_executable = cad_venv_python if os.path.exists(cad_venv_python) else sys.executable
 
@@ -355,7 +445,8 @@ import cadquery as cq
 result = cq.importers.importStep("{step_path}")
 cq.exporters.export(result, "{output_path}", exportType="STL")
 """
-        script_file = step_path + ".convert.py"
+        fd, script_file = tempfile.mkstemp(suffix=".py", prefix="cq_convert_")
+        os.close(fd)
         with open(script_file, "w") as f:
             f.write(convert_script)
         try:
