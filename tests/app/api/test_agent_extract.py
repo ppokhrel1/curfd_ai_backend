@@ -1,10 +1,14 @@
-"""Tests for agent helper functions (_extract_from_text, _extract_parameters_from_code)."""
+"""Tests for agent helper functions (_extract_from_text, _extract_parameters_from_code, _score_openscad_code, etc.)."""
 
 import pytest
 
 from app.services.openscad_agent.agent import (
     _extract_from_text,
     _extract_parameters_from_code,
+    _score_openscad_code,
+    _extract_openscad_from_text,
+    _looks_like_openscad,
+    _strip_code_fences,
 )
 
 
@@ -46,6 +50,127 @@ def test_extract_parameters_ranges():
     p = params[0]
     assert p["min_val"] == 10.0   # 20 * 0.5
     assert p["max_val"] == 30.0   # 20 * 1.5
+
+
+# ── _score_openscad_code ─────────────────────────────────────────────────────
+
+def test_score_openscad_code_valid():
+    """Valid OpenSCAD code should score high."""
+    code = """\
+$fn = 64;
+width = 20;
+height = 30;
+
+module box() {
+    cube([width, width, height]);
+}
+
+main();
+"""
+    score = _score_openscad_code(code)
+    assert score >= 3
+
+
+def test_score_openscad_code_complex():
+    """Code with many OpenSCAD features should score very high."""
+    code = """\
+$fn = 64;
+width = 20;
+height = 30;
+wall = 2;
+
+module body() {
+    difference() {
+        cylinder(h=height, r=width);
+        translate([0, 0, wall])
+            cylinder(h=height, r=width-wall);
+    }
+}
+
+module handle() {
+    translate([width, 0, height/2])
+    rotate([90, 0, 0])
+    linear_extrude(height=10)
+    circle(r=15);
+}
+
+module main() {
+    union() {
+        body();
+        handle();
+    }
+}
+
+main();
+"""
+    score = _score_openscad_code(code)
+    assert score >= 5
+
+
+def test_score_openscad_code_not_openscad():
+    """Regular text should score low."""
+    assert _score_openscad_code("Hello, this is just regular text.") < 3
+
+
+def test_score_openscad_code_empty():
+    assert _score_openscad_code("") == 0
+
+
+def test_score_openscad_code_short():
+    assert _score_openscad_code("x = 1;") == 0
+
+
+# ── _looks_like_openscad ────────────────────────────────────────────────────
+
+def test_looks_like_openscad_true():
+    code = "$fn=64;\nmodule foo() {\n  cube([10,10,10]);\n  translate([5,5,5]) sphere(r=3);\n}"
+    assert _looks_like_openscad(code) is True
+
+
+def test_looks_like_openscad_false():
+    assert _looks_like_openscad("This is just text") is False
+
+
+# ── _extract_openscad_from_text ──────────────────────────────────────────────
+
+def test_extract_openscad_from_text_code_block():
+    text = "Here is your model:\n\n```openscad\ncube([10, 10, 10]);\nsphere(r=5);\nmodule foo() {}\n```\n"
+    code = _extract_openscad_from_text(text)
+    assert code is not None
+    assert "cube([10, 10, 10]);" in code
+
+
+def test_extract_openscad_from_text_raw_code():
+    """Raw OpenSCAD without fences should be extracted if score >= 5."""
+    code = "$fn=64;\nwidth=20;\nheight=30;\nmodule box() {\n  cube([width,width,height]);\n}\ntranslate([0,0,0]) box();\n"
+    result = _extract_openscad_from_text(code)
+    assert result is not None
+    assert "cube" in result
+
+
+def test_extract_openscad_from_text_no_code():
+    assert _extract_openscad_from_text("Just a regular chat message.") is None
+
+
+def test_extract_openscad_from_text_empty():
+    assert _extract_openscad_from_text("") is None
+
+
+# ── _strip_code_fences ───────────────────────────────────────────────────────
+
+def test_strip_code_fences_openscad():
+    code = "```openscad\ncube([10,10,10]);\n```"
+    assert _strip_code_fences(code) == "cube([10,10,10]);"
+
+
+def test_strip_code_fences_plain():
+    code = "```\ncube([10,10,10]);\n```"
+    assert _strip_code_fences(code) == "cube([10,10,10]);"
+
+
+def test_strip_code_fences_no_fences():
+    code = "cube([10,10,10]);"
+    assert _strip_code_fences(code) == "cube([10,10,10]);"
 
 
 # ── _extract_from_text ───────────────────────────────────────────────────────
@@ -94,3 +219,11 @@ def test_extract_from_text_code_block_preferred_over_sentinel():
     result = _extract_from_text(text)
     # The code block version should be used (20, not 10)
     assert "20" in result["openscad_code"]
+
+
+def test_extract_from_text_raw_openscad_fallback():
+    """Test that raw OpenSCAD code is extracted via score-based fallback."""
+    raw_code = "$fn=64;\nwidth=20;\nheight=30;\nmodule box() {\n  cube([width,width,height]);\n}\ntranslate([0,0,0]) box();\n"
+    result = _extract_from_text(raw_code)
+    assert result["openscad_code"] != ""
+    assert result["model_type"] == "mechanical"

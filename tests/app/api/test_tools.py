@@ -3,11 +3,14 @@
 import json
 import pytest
 
-from app.services.openscad_agent.tools.parameter_patcher import apply_parameter_changes
+from app.services.openscad_agent.tools.parameter_patcher import (
+    apply_parameter_changes,
+    patch_code,
+)
 from app.services.openscad_agent.tools.model_builder import build_parametric_model
 
 
-# ── apply_parameter_changes ──────────────────────────────────────────────────
+# ── patch_code (direct function, not tool) ──────────────────────────────────
 
 SAMPLE_CODE = """\
 $fn = 64;
@@ -27,106 +30,99 @@ main();
 """
 
 
-def test_apply_parameter_changes_single():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": '{"width": 40}',
-    })
-    assert "PATCHED 1 parameter(s)" in result
-    assert "width: 20 -> 40" in result
-    assert "---PATCHED_CODE_START---" in result
-    assert "width = 40;" in result
+def test_patch_code_single():
+    patched, applied, not_found = patch_code(SAMPLE_CODE, [{"name": "width", "value": "40"}])
+    assert len(applied) == 1
+    assert "width: 20 -> 40" in applied[0]
+    assert "width = 40;" in patched
     # Other params unchanged
-    assert "height = 30;" in result
+    assert "height = 30;" in patched
+    assert not not_found
 
 
-def test_apply_parameter_changes_multiple():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": '{"width": 50, "height": 60}',
-    })
-    assert "PATCHED 2 parameter(s)" in result
-    assert "width = 50;" in result
-    assert "height = 60;" in result
+def test_patch_code_multiple():
+    patched, applied, not_found = patch_code(
+        SAMPLE_CODE,
+        [{"name": "width", "value": "50"}, {"name": "height", "value": "60"}],
+    )
+    assert len(applied) == 2
+    assert "width = 50;" in patched
+    assert "height = 60;" in patched
 
 
-def test_apply_parameter_changes_not_found():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": '{"nonexistent": 99}',
-    })
-    assert "No parameters matched" in result
-    assert "---PATCHED_CODE_START---" not in result
+def test_patch_code_not_found():
+    patched, applied, not_found = patch_code(
+        SAMPLE_CODE, [{"name": "nonexistent", "value": "99"}]
+    )
+    assert not applied
+    assert "nonexistent" in not_found
 
 
-def test_apply_parameter_changes_partial_match():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": '{"width": 25, "missing_param": 10}',
-    })
-    assert "PATCHED 1 parameter(s)" in result
-    assert "NOT FOUND: missing_param" in result
-    assert "---PATCHED_CODE_START---" in result
+def test_patch_code_partial_match():
+    patched, applied, not_found = patch_code(
+        SAMPLE_CODE,
+        [{"name": "width", "value": "25"}, {"name": "missing_param", "value": "10"}],
+    )
+    assert len(applied) == 1
+    assert "missing_param" in not_found
+    assert "width = 25;" in patched
 
 
-def test_apply_parameter_changes_invalid_json():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": "not valid json",
-    })
-    assert "ERROR" in result
-    assert "valid JSON" in result
+def test_patch_code_float_value():
+    patched, applied, not_found = patch_code(
+        SAMPLE_CODE, [{"name": "wall_thickness", "value": "2.0"}]
+    )
+    assert len(applied) == 1
+    assert "wall_thickness: 1.5 -> 2" in applied[0]
 
 
-def test_apply_parameter_changes_non_object_json():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": "[1, 2, 3]",
-    })
-    assert "ERROR" in result
-    assert "JSON object" in result
-
-
-def test_apply_parameter_changes_float_value():
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": '{"wall_thickness": 2.0}',
-    })
-    assert "PATCHED 1 parameter(s)" in result
-    assert "wall_thickness: 1.5 -> 2.0" in result
-
-
-def test_apply_parameter_changes_preserves_structure():
+def test_patch_code_preserves_structure():
     """Ensure patching only changes the value, not surrounding code."""
-    result = apply_parameter_changes.invoke({
-        "existing_code": SAMPLE_CODE,
-        "parameter_changes": '{"width": 35}',
-    })
-    # Extract patched code
-    start = result.index("---PATCHED_CODE_START---") + len("---PATCHED_CODE_START---\n")
-    end = result.index("\n---PATCHED_CODE_END---")
-    patched = result[start:end]
-    # Module definition should be untouched
+    patched, applied, not_found = patch_code(
+        SAMPLE_CODE, [{"name": "width", "value": "35"}]
+    )
     assert "module box()" in patched
     assert "main();" in patched
+
+
+def test_patch_code_empty_updates():
+    patched, applied, not_found = patch_code(SAMPLE_CODE, [])
+    assert patched == SAMPLE_CODE
+    assert not applied
+    assert not not_found
+
+
+# ── apply_parameter_changes tool (schema only, intercepted by agent) ─────────
+
+def test_apply_parameter_changes_tool_returns_message():
+    """The tool itself just returns a status message (intercepted by agent loop)."""
+    result = apply_parameter_changes.invoke({
+        "updates": [{"name": "width", "value": "30"}],
+    })
+    assert "APPLY PARAMETER CHANGES" in result
 
 
 # ── build_parametric_model ───────────────────────────────────────────────────
 
 def test_build_parametric_model_returns_instruction():
     result = build_parametric_model.invoke({
-        "description": "Spur gear with 20 teeth",
-        "requirements": "Module 2, pressure angle 20 degrees, center bore 8mm",
+        "text": "Spur gear with 20 teeth",
     })
     assert "PROCEED WITH FULL CODE GENERATION" in result
     assert "Spur gear with 20 teeth" in result
-    assert "Module 2" in result
 
 
-def test_build_parametric_model_empty_requirements():
+def test_build_parametric_model_with_base_code():
     result = build_parametric_model.invoke({
-        "description": "Simple box",
-        "requirements": "",
+        "text": "Add a handle to this mug",
+        "baseCode": "cylinder(h=100, r=40);",
     })
     assert "PROCEED WITH FULL CODE GENERATION" in result
-    assert "Simple box" in result
+
+
+def test_build_parametric_model_with_error():
+    result = build_parametric_model.invoke({
+        "text": "Fix the syntax error",
+        "error": "Expected ';' at line 5",
+    })
+    assert "PROCEED WITH FULL CODE GENERATION" in result

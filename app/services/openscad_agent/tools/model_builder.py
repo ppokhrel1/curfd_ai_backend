@@ -7,27 +7,31 @@ logger = logging.getLogger(__name__)
 
 @tool
 def build_parametric_model(
-    description: str,
-    requirements: str,
+    text: str,
+    baseCode: str = "",
+    error: str = "",
 ) -> str:
-    """Signal that a full parametric model generation is needed.
+    """Generate or update an OpenSCAD model from user intent and context.
+    Include parameters and ensure the model is manifold and 3D-printable.
+
     Use this when:
     - The user requests a NEW model
     - The user wants STRUCTURAL changes (new components, different topology)
     - Parameter patching is not sufficient
 
-    After calling this tool, generate the complete OpenSCAD code in your response.
-
     Args:
-        description: Brief description of the model to build.
-        requirements: Key requirements and constraints.
+        text: User request for the model.
+        baseCode: Existing code to modify (if any).
+        error: Error to fix (if any).
 
     Returns:
-        Instruction to proceed with full code generation.
+        Instruction to proceed with code generation.
     """
+    # This tool is intercepted by the agent loop which makes a separate
+    # LLM call with CODE_PROMPT. This return value is only a fallback.
     return (
         f"PROCEED WITH FULL CODE GENERATION.\n"
-        f"Model: {description}\n"
-        f"Requirements: {requirements}\n"
+        f"Model: {text}\n"
+        f"Requirements: {baseCode or 'new model'}\n"
         f"Generate the complete OpenSCAD code in your response."
     )
