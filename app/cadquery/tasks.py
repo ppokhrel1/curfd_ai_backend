@@ -115,14 +115,22 @@ def _cache_put(key: str, ext: str, src_path: str) -> str:
     return dst
 
 
-def _run_openscad(script_path: str, output_path: str) -> subprocess.CompletedProcess:
-    cmd = ["openscad"] + _OPENSCAD_EXTRA_FLAGS + ["-o", output_path, script_path]
+def _run_openscad(
+    script_path: str,
+    output_path: str,
+    preview: bool = False,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess:
+    cmd = ["openscad"] + _OPENSCAD_EXTRA_FLAGS
+    if preview:
+        cmd += ["-D", "$fn=24"]
+    cmd += ["-o", output_path, script_path]
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         cwd=GENERATED_FILES_DIR,
-        timeout=60,
+        timeout=timeout,
     )
 
 
@@ -220,90 +228,55 @@ def _strip_toplevel_calls(scad_code: str) -> str:
 
 def _generate_multipart_zip(task_id: str, script_content: str) -> str:
     """
-    Compile each named module in the SCAD script as a separate STL, then bundle
-    them into a ZIP.  The frontend's ModelImporter.importZip() loads each STL
-    as a separate named mesh, enabling per-part selection in the viewer.
-
-    Modules are compiled in parallel for speed.
+    Compile the full OpenSCAD model as a single STL with reduced $fn for fast
+    preview, then bundle it into a ZIP.  Individual parts can be compiled
+    on demand via the /compile-part endpoint.
     """
-    modules = _extract_module_names(script_content)
-    logger.info(f"[multipart] found modules: {modules}")
+    cache_key = _content_hash(script_content + "GLB_PREVIEW")
+    cached = _cache_get(cache_key, "stl")
 
-    # Strip bare top-level calls (e.g. `main();`) so we can inject our own entry point.
-    # Only strips at brace-depth 0 — calls inside module bodies are preserved.
-    base_script = _strip_toplevel_calls(script_content)
+    stl_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
 
-    module_stls: dict = {}
-
-    if modules:
-        # Compile all modules in parallel (up to 4 concurrent OpenSCAD processes)
-        max_workers = 1
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(_compile_single_module, task_id, base_script, mod): mod
-                for mod in modules
-            }
-            for future in as_completed(futures):
-                module_name, stl_path = future.result()
-                if stl_path:
-                    module_stls[module_name] = stl_path
-
-    # Fall back to full model if no individual modules produced geometry
-    if not module_stls:
-        logger.warning(
-            "[multipart] no modules compiled; falling back to full model STL. "
-            f"Code first 20 lines:\n"
-            + "\n".join(f"  {i+1}: {l}" for i, l in enumerate(script_content.split("\n")[:20]))
-        )
-
-        cache_key = _content_hash(script_content)
-        cached = _cache_get(cache_key, "stl")
-        if cached:
-            import shutil
-            fallback_stl = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
-            shutil.copy2(cached, fallback_stl)
-            module_stls["model"] = fallback_stl
-            logger.info("[multipart] cache hit for full model fallback")
-        else:
-            fallback_scad = os.path.join(GENERATED_FILES_DIR, f"{task_id}.scad")
-            fallback_stl = os.path.join(GENERATED_FILES_DIR, f"{task_id}.stl")
-            with open(fallback_scad, "w") as f:
-                f.write(script_content)
-            try:
-                result = _run_openscad(fallback_scad, fallback_stl)
-                if (
-                    result.returncode == 0
-                    and os.path.exists(fallback_stl)
-                    and os.path.getsize(fallback_stl) > 84
-                ):
-                    module_stls["model"] = fallback_stl
-                    _cache_put(cache_key, "stl", fallback_stl)
-                else:
-                    logger.error(
-                        f"[multipart] full model fallback failed. "
-                        f"rc={result.returncode}, stderr={result.stderr[:500]}"
-                    )
-                    _raise_openscad_error(result.stderr)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(json.dumps({"line": None, "message": "OpenSCAD timed out."}))
-            finally:
-                if os.path.exists(fallback_scad):
-                    os.remove(fallback_scad)
+    if cached:
+        import shutil
+        shutil.copy2(cached, stl_path)
+        logger.info(f"[multipart] cache hit for full model")
+    else:
+        scad_path = os.path.join(GENERATED_FILES_DIR, f"{task_id}.scad")
+        with open(scad_path, "w") as f:
+            f.write(script_content)
+        try:
+            result = _run_openscad(scad_path, stl_path, preview=True)
+            if (
+                result.returncode != 0
+                or not os.path.exists(stl_path)
+                or os.path.getsize(stl_path) <= 84
+            ):
+                logger.error(
+                    f"[multipart] compilation failed. "
+                    f"rc={result.returncode}, stderr={result.stderr[:500]}"
+                )
+                _raise_openscad_error(result.stderr)
+            _cache_put(cache_key, "stl", stl_path)
+            logger.info(f"[multipart] compiled model.stl ({os.path.getsize(stl_path)} bytes)")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(json.dumps({"line": None, "message": "OpenSCAD timed out."}))
+        finally:
+            if os.path.exists(scad_path):
+                os.remove(scad_path)
 
     # Bundle into ZIP
     zip_filename = f"{task_id}.zip"
     zip_path = os.path.join(GENERATED_FILES_DIR, zip_filename)
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for module_name, stl_path in module_stls.items():
-            zf.write(stl_path, f"{module_name}.stl")
+        zf.write(stl_path, "model.stl")
 
-    for stl_path in module_stls.values():
-        try:
-            os.remove(stl_path)
-        except OSError:
-            pass
+    try:
+        os.remove(stl_path)
+    except OSError:
+        pass
 
-    logger.info(f"[multipart] created ZIP with {len(module_stls)} part(s): {zip_filename}")
+    logger.info(f"[multipart] created ZIP: {zip_filename}")
     return zip_filename
 
 

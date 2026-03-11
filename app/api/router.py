@@ -8,6 +8,7 @@ from app.api.routes import (
     chat_stream,
     chats,
     health,
+    init,
     jobs,
     messages,
     prompts,
@@ -39,4 +40,5 @@ api_router.include_router(scad_versions.router, prefix="/scad-versions", tags=["
 api_router.include_router(assembly.router, tags=["assembly"])
 api_router.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
 api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
+api_router.include_router(init.router, prefix="/init", tags=["init"])
 

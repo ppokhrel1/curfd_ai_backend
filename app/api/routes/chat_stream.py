@@ -102,14 +102,15 @@ def _serialize_asset(asset: AssetModel) -> dict[str, Any]:
 
 
 async def _load_serialized_messages(
-    db: AsyncSession, chat_id: str
+    db: AsyncSession, chat_id: str, limit: int = 100
 ) -> list[dict[str, Any]]:
     result = await db.execute(
         select(MessageModel)
         .where(MessageModel.chat_id == chat_id)
-        .order_by(MessageModel.created_at.asc())
+        .order_by(MessageModel.created_at.desc())
+        .limit(limit)
     )
-    messages = result.scalars().all()
+    messages = list(reversed(result.scalars().all()))
     return [_serialize_message(message) for message in messages]
 
 
