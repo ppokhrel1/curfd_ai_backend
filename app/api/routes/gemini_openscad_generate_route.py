@@ -184,13 +184,11 @@ async def _build_lc_history(db: AsyncSession, chat_id: str) -> list:
                     meta = None
 
             code = meta.get("openscad_code") if isinstance(meta, dict) else None
-            friendly = meta.get("message") if isinstance(meta, dict) else None
 
-            # Present previous code naturally so the model recognizes it as its own
-            # output and can refine it on follow-up requests.
+            # CADAM pattern: send raw code as assistant content so the code-gen
+            # model sees its own previous output cleanly (no markdown wrapping).
             if code:
-                ai_text = f"{friendly or 'Here is the model.'}\n\n```openscad\n{code}\n```"
-                lc_messages.append(AIMessage(content=ai_text))
+                lc_messages.append(AIMessage(content=code))
             elif msg.content and msg.content != "Model generated.":
                 lc_messages.append(AIMessage(content=msg.content))
 

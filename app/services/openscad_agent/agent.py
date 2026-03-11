@@ -81,13 +81,20 @@ def _build_direct_generation_messages(
 
 
 def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> str:
-    """Extract the most recent OpenSCAD code from conversation history."""
+    """Extract the most recent OpenSCAD code from conversation history.
+
+    After the CADAM-style history format change, assistant messages contain
+    raw code directly, so we check for OpenSCAD-like content first.
+    """
     for msg in reversed(history):
         if isinstance(msg, AIMessage):
             text = _extract_text_content(msg)
-            if text and _looks_like_openscad(text):
+            if not text:
+                continue
+            # History now contains raw code (CADAM pattern)
+            if _looks_like_openscad(text):
                 return text.strip()
-            # Also try extracting from code blocks
+            # Fallback: try extracting from code blocks (legacy format)
             code_match = _CODE_BLOCK_RE.search(text)
             if code_match:
                 return code_match.group(1).strip()
@@ -104,14 +111,16 @@ async def _generate_code(
 ) -> str:
     """Make a separate LLM call with CODE_PROMPT to generate OpenSCAD code.
 
-    This matches CADAM's pattern where build_parametric_model triggers
-    a dedicated code generation call with STRICT_CODE_PROMPT.
+    Matches CADAM's handleToolCall pattern:
+    - System: STRICT_CODE_PROMPT
+    - ...full conversation history (history already excludes current user msg)
+    - (optional) Assistant: baseCode
+    - User: original user request (+ error context if present)
     """
-    text = tool_args.get("text", user_input)
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    # Build code generation messages
+    # Build code generation messages (CADAM pattern)
     code_messages: list = [SystemMessage(content=CODE_PROMPT)]
     code_messages.extend(history)
 
@@ -119,16 +128,12 @@ async def _generate_code(
     if base_code:
         code_messages.append(AIMessage(content=base_code))
 
-    # Build user message with error context if present
-    user_text = text
+    # Always use the ORIGINAL user message, not the tool's paraphrased text
+    user_text = user_input
     if error:
-        user_text = f"{text}\n\nFix this OpenSCAD error: {error}"
+        user_text = f"{user_input}\n\nFix this OpenSCAD error: {error}"
 
-    # If base code was added, re-state user request so conversation ends with user
-    if base_code or error:
-        code_messages.append(HumanMessage(content=user_text))
-    elif not any(isinstance(m, HumanMessage) and _extract_text_content(m) == text for m in code_messages):
-        code_messages.append(HumanMessage(content=user_text))
+    code_messages.append(HumanMessage(content=user_text))
 
     llm = components["llm"]
     result = await llm.ainvoke(code_messages)
@@ -146,8 +151,10 @@ async def _generate_code_stream(
     components: dict,
     user_input: str = "",
 ) -> AsyncGenerator[str, None]:
-    """Stream code generation tokens from a separate LLM call with CODE_PROMPT."""
-    text = tool_args.get("text", user_input)
+    """Stream code generation tokens from a separate LLM call with CODE_PROMPT.
+
+    Matches CADAM's pattern: uses original user_input, not tool's paraphrased text.
+    """
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
@@ -157,14 +164,12 @@ async def _generate_code_stream(
     if base_code:
         code_messages.append(AIMessage(content=base_code))
 
-    user_text = text
+    # Always use original user message
+    user_text = user_input
     if error:
-        user_text = f"{text}\n\nFix this OpenSCAD error: {error}"
+        user_text = f"{user_input}\n\nFix this OpenSCAD error: {error}"
 
-    if base_code or error:
-        code_messages.append(HumanMessage(content=user_text))
-    elif not any(isinstance(m, HumanMessage) and _extract_text_content(m) == text for m in code_messages):
-        code_messages.append(HumanMessage(content=user_text))
+    code_messages.append(HumanMessage(content=user_text))
 
     llm = components["llm"]
     async for chunk in llm.astream(code_messages):
