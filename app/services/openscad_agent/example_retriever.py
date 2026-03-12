@@ -25,7 +25,7 @@ MAX_EXAMPLES = 2
 MAX_CODE_LENGTH = 4000
 STORAGE_BUCKET = "openscad-examples"
 EMBEDDING_MODEL = "gemini-embedding-001"
-SIMILARITY_THRESHOLD = 0.3  # Minimum cosine similarity to consider a match
+SIMILARITY_THRESHOLD = 0.6  # Minimum cosine similarity to consider a match
 
 # ── Embedding generation ────────────────────────────────────────────────────
 
