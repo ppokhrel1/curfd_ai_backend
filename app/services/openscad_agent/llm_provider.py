@@ -12,7 +12,7 @@ _DEFAULTS = {
     "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-2.5-flash",
     "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-20250514",
+    "anthropic": "claude-opus-4-6",
     "openrouter": "anthropic/claude-sonnet-4",
 }
 
