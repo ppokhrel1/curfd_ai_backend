@@ -66,30 +66,16 @@ def get_llm(
         )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        import langchain_anthropic
-
-        lc_version = getattr(langchain_anthropic, "__version__", "0.0.0")
-        logger.info(f"[LLM] langchain-anthropic version: {lc_version}")
 
         kwargs: dict = {
             "model": model,
             "api_key": settings.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
         }
         if thinking:
-            try:
-                from packaging.version import Version
-                supports_thinking = Version(lc_version) >= Version("0.3.0")
-            except Exception:
-                supports_thinking = hasattr(ChatAnthropic, "model_fields") and "thinking" in ChatAnthropic.model_fields
-
-            if supports_thinking:
-                kwargs["thinking"] = {"type": "adaptive", "budget_tokens": 8_000}
-            else:
-                kwargs["model_kwargs"] = {"thinking": {"type": "adaptive", "budget_tokens": 8_000}}
-                logger.warning("[LLM] Old langchain-anthropic — using model_kwargs for thinking. Run: pip install 'langchain-anthropic>=0.3' --upgrade")
+            kwargs["thinking"] = {"type": "adaptive"}
             kwargs["max_tokens"] = max_tokens
             kwargs["temperature"] = 1
-            logger.info(f"[LLM] Creating Anthropic LLM with THINKING ENABLED: model={model}, max_tokens={max_tokens}")
+            logger.info(f"[LLM] Creating Anthropic LLM with ADAPTIVE THINKING: model={model}, max_tokens={max_tokens}")
         else:
             kwargs["temperature"] = temperature
             kwargs["max_tokens"] = max_tokens
