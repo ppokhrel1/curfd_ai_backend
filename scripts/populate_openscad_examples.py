@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Fetch OpenSCAD examples from HuggingFace, upload code to Supabase Storage,
-generate embeddings, and save references in the openscad_examples DB table.
+"""Fetch OpenSCAD examples from multiple HuggingFace datasets, upload code to
+Supabase Storage, generate embeddings, and save references in the
+openscad_examples DB table.
 
 Usage:
-    python -m scripts.populate_openscad_examples [--dry-run] [--limit N]
+    python -m scripts.populate_openscad_examples [--dry-run] [--limit N] [--dataset NAME]
 
 Requires: pip install datasets
 """
 
 import argparse
 import asyncio
-import json
 import logging
 import re
 import sys
@@ -31,11 +31,45 @@ from app.models.openscad_example import OpenscadExample
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-HF_DATASET = "redcathode/thingiverse-openscad"
 STORAGE_BUCKET = "openscad-examples"
 STORAGE_FOLDER = "examples"
 EMBEDDING_MODEL = "gemini-embedding-001"
-EMBEDDING_DIM = 768
+
+# ── Dataset definitions ─────────────────────────────────────────────────────
+
+DATASETS = {
+    "thingiverse": {
+        "hf_name": "redcathode/thingiverse-openscad",
+        "source": "huggingface",
+        "extract": lambda row: {
+            "name": row["name"],
+            "code": row["scad"],
+            "prompt": row.get("fakeprompt") or row.get("description") or row["name"],
+            "description": row.get("description", ""),
+        },
+    },
+    "thomasthemaker": {
+        "hf_name": "ThomasTheMaker/OpenSCAD",
+        "source": "thomasthemaker",
+        "extract": lambda row: {
+            "name": row["object"],
+            "code": row["scad"],
+            "prompt": row.get("description") or row["object"],
+            "description": row.get("description", ""),
+        },
+    },
+    "synthetic-v29": {
+        "hf_name": "ThomasTheMaker/Synthetic-Openscad-v29",
+        "source": "synthetic-v29",
+        "extract": lambda row: {
+            "name": row["name"],
+            "code": row.get("original_code") or row.get("code", ""),
+            "prompt": row["name"],
+            "description": row["name"],
+            "valid": row.get("valid", True),
+        },
+    },
+}
 
 # ── Embedding helpers ────────────────────────────────────────────────────────
 
@@ -173,102 +207,140 @@ def clean_code(raw: str) -> str:
     """Clean raw code from the dataset — strip filename headers and markdown fences."""
     code = re.sub(r'^[^\n]+\.scad:\s*\n```\s*\n?', '', raw, flags=re.MULTILINE)
     code = re.sub(r'\n```\s*$', '', code)
-    code = re.sub(r'^```(?:openscad)?\s*\n?', '', code)
+    code = re.sub(r'^```(?:openscad|scad)?\s*\n?', '', code)
     code = re.sub(r'\n?```\s*$', '', code)
     return code.strip()
 
 
 # ── Main population logic ────────────────────────────────────────────────────
 
-async def populate(dry_run: bool = False, limit: int | None = None) -> None:
+async def populate(
+    dry_run: bool = False,
+    limit: int | None = None,
+    dataset_name: str | None = None,
+) -> None:
     """Fetch from HuggingFace, upload to Supabase Storage, generate embeddings, save refs in DB."""
-    # Validate required settings
     gemini_key = settings.gemini_api_key
     if not gemini_key and not dry_run:
         raise RuntimeError("GEMINI_API_KEY is required for embedding generation")
 
-    logger.info(f"Loading dataset: {HF_DATASET}")
-    ds = load_dataset(HF_DATASET, split="train")
-    logger.info(f"Dataset loaded: {len(ds)} rows")
+    # Determine which datasets to process
+    if dataset_name:
+        if dataset_name not in DATASETS:
+            raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASETS.keys())}")
+        datasets_to_process = {dataset_name: DATASETS[dataset_name]}
+    else:
+        datasets_to_process = DATASETS
 
-    # Process and filter
-    examples = []
+    all_examples: list[dict] = []
     category_counts: dict[str, int] = {}
-    max_per_category = 20
+    max_per_category = 20  # per dataset
 
-    for row in ds:
-        raw_code = row["scad"]
-        code = clean_code(raw_code)
+    for ds_key, ds_config in datasets_to_process.items():
+        hf_name = ds_config["hf_name"]
+        source = ds_config["source"]
+        extract = ds_config["extract"]
 
-        if not is_quality_code(code):
+        logger.info(f"Loading dataset: {hf_name}")
+        try:
+            ds = load_dataset(hf_name, split="train")
+        except Exception as e:
+            logger.warning(f"Failed to load {hf_name}: {e}")
             continue
+        logger.info(f"  {hf_name}: {len(ds)} rows")
 
-        name = row["name"]
-        prompt = row["fakeprompt"] or row["description"] or name
-        category = classify_category(name, row.get("description", ""))
+        ds_category_counts: dict[str, int] = {}
+        ds_count = 0
 
-        if category_counts.get(category, 0) >= max_per_category:
-            continue
+        for row in ds:
+            extracted = extract(row)
 
-        example_id = str(uuid.uuid4())
-        examples.append({
-            "id": example_id,
-            "name": name,
-            "category": category,
-            "prompt": prompt[:2000],
-            "code": code,
-            "source": "huggingface",
-        })
-        category_counts[category] = category_counts.get(category, 0) + 1
+            # Skip invalid rows from synthetic dataset
+            if not extracted.get("valid", True):
+                continue
 
-        if limit and len(examples) >= limit:
+            raw_code = extracted["code"]
+            code = clean_code(raw_code)
+
+            if not is_quality_code(code):
+                continue
+
+            name = extracted["name"]
+            prompt = extracted["prompt"]
+            description = extracted.get("description", "")
+            category = classify_category(name, description)
+
+            if ds_category_counts.get(category, 0) >= max_per_category:
+                continue
+
+            example_id = str(uuid.uuid4())
+            all_examples.append({
+                "id": example_id,
+                "name": name,
+                "category": category,
+                "prompt": prompt[:2000],
+                "code": code,
+                "source": source,
+            })
+            ds_category_counts[category] = ds_category_counts.get(category, 0) + 1
+            category_counts[category] = category_counts.get(category, 0) + 1
+            ds_count += 1
+
+            if limit and len(all_examples) >= limit:
+                break
+
+        logger.info(f"  {hf_name}: kept {ds_count} quality examples")
+
+        if limit and len(all_examples) >= limit:
             break
 
-    logger.info(f"Filtered to {len(examples)} quality examples")
+    logger.info(f"Total: {len(all_examples)} quality examples")
     logger.info(f"Categories: {dict(sorted(category_counts.items()))}")
 
     if dry_run:
         logger.info("[DRY RUN] Would upload and insert:")
-        for ex in examples[:10]:
-            logger.info(f"  [{ex['category']}] {ex['name']} ({len(ex['code'])} chars)")
-        logger.info(f"  ... and {max(0, len(examples) - 10)} more")
+        for ex in all_examples[:15]:
+            logger.info(f"  [{ex['source']}] [{ex['category']}] {ex['name']} ({len(ex['code'])} chars)")
+        logger.info(f"  ... and {max(0, len(all_examples) - 15)} more")
         return
 
     # Generate embeddings in batches
     logger.info("Generating embeddings...")
     embedding_batch_size = 50
     all_embeddings: list[list[float]] = []
-    for i in range(0, len(examples), embedding_batch_size):
+    for i in range(0, len(all_examples), embedding_batch_size):
         batch_texts = [
             f"{ex['name']}. {ex['category']}. {ex['prompt'][:500]}"
-            for ex in examples[i : i + embedding_batch_size]
+            for ex in all_examples[i : i + embedding_batch_size]
         ]
         batch_embeddings = get_embeddings(batch_texts, gemini_key)
         all_embeddings.extend(batch_embeddings)
-        logger.info(f"Embedded batch {i // embedding_batch_size + 1}/{(len(examples) + embedding_batch_size - 1) // embedding_batch_size}")
+        logger.info(f"Embedded batch {i // embedding_batch_size + 1}/{(len(all_examples) + embedding_batch_size - 1) // embedding_batch_size}")
 
     # Upload to Supabase Storage and insert references into DB
     with httpx.Client(timeout=30.0) as http:
         ensure_bucket(http)
 
         async with SessionLocal() as db:
-            # Clear existing HuggingFace examples
-            await db.execute(
-                delete(OpenscadExample).where(OpenscadExample.source == "huggingface")
-            )
+            # Clear existing examples for the sources being processed
+            sources = [ds_config["source"] for ds_config in datasets_to_process.values()]
+            for source in sources:
+                await db.execute(
+                    delete(OpenscadExample).where(OpenscadExample.source == source)
+                )
             await db.commit()
-            logger.info("Cleared existing HuggingFace examples from DB")
+            logger.info(f"Cleared existing examples for sources: {sources}")
 
             batch_size = 25
             uploaded = 0
-            for i in range(0, len(examples), batch_size):
-                batch = examples[i : i + batch_size]
+            for i in range(0, len(all_examples), batch_size):
+                batch = all_examples[i : i + batch_size]
                 batch_embeddings = all_embeddings[i : i + batch_size]
 
                 for j, ex in enumerate(batch):
                     # Upload .scad file to storage
                     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', ex["name"])[:80]
-                    file_path = f"{ex['category']}/{safe_name}_{ex['id'][:8]}.scad"
+                    file_path = f"{ex['source']}/{ex['category']}/{safe_name}_{ex['id'][:8]}.scad"
 
                     try:
                         storage_path = upload_to_storage(http, file_path, ex["code"])
@@ -276,8 +348,6 @@ async def populate(dry_run: bool = False, limit: int | None = None) -> None:
                         logger.warning(f"Failed to upload {ex['name']}: {e}")
                         continue
 
-                    # Insert row with embedding via raw SQL (pgvector)
-                    # Use string format for vector since asyncpg doesn't support ::vector cast in params
                     embedding_str = "[" + ",".join(str(v) for v in batch_embeddings[j]) + "]"
                     await db.execute(
                         text("""
@@ -302,13 +372,16 @@ async def populate(dry_run: bool = False, limit: int | None = None) -> None:
             # Verify
             result = await db.execute(select(func.count(OpenscadExample.id)))
             final_count = result.scalar()
-            logger.info(f"Done! Uploaded {uploaded} files, {final_count} references in DB")
+            logger.info(f"Done! Uploaded {uploaded} files, {final_count} total references in DB")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Populate OpenSCAD examples from HuggingFace")
     parser.add_argument("--dry-run", action="store_true", help="Don't upload, just show what would be processed")
-    parser.add_argument("--limit", type=int, default=None, help="Max examples to process")
+    parser.add_argument("--limit", type=int, default=None, help="Max total examples to process")
+    parser.add_argument("--dataset", type=str, default=None,
+                        choices=list(DATASETS.keys()),
+                        help="Only process a specific dataset (default: all)")
     args = parser.parse_args()
 
-    asyncio.run(populate(dry_run=args.dry_run, limit=args.limit))
+    asyncio.run(populate(dry_run=args.dry_run, limit=args.limit, dataset_name=args.dataset))

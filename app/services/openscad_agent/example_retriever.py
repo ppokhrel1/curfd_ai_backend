@@ -176,6 +176,63 @@ def _format_web_results(web_text: str) -> str:
     )
 
 
+# ── Generic fallback (when RAG + web search both empty) ─────────────────────
+
+GENERIC_EXAMPLE = """
+# REFERENCE EXAMPLE (generic template — adapt structure to user's request)
+
+$fn = 64;
+eps = 0.01;
+
+// --- Parameters (mm) ---
+body_width = 60;
+body_depth = 40;
+body_height = 30;
+wall = 2;
+corner_r = 3;
+hole_d = 5;
+hole_spacing = 20;
+
+// --- Modules ---
+module rounded_box(w, d, h, r) {
+    minkowski() {
+        cube([w - 2*r, d - 2*r, h]);
+        cylinder(r=r, h=eps);
+    }
+}
+
+module mounting_holes() {
+    for (dx = [-1, 1])
+        translate([body_width/2 + dx*hole_spacing/2, body_depth/2, -eps])
+            cylinder(d=hole_d + 0.4, h=wall + 2*eps);
+}
+
+module main() {
+    difference() {
+        // Outer shell
+        rounded_box(body_width, body_depth, body_height, corner_r);
+
+        // Hollow interior
+        translate([wall, wall, wall])
+            rounded_box(body_width - 2*wall, body_depth - 2*wall, body_height, corner_r);
+
+        // Mounting holes
+        mounting_holes();
+    }
+}
+
+main();
+"""
+
+
+def _generic_fallback_example() -> str:
+    """Return a generic well-structured OpenSCAD example as last-resort context."""
+    return (
+        "\n# REFERENCE EXAMPLE (generic — adapt the parametric structure to the user's request)\n"
+        + GENERIC_EXAMPLE
+    )
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
@@ -214,5 +271,5 @@ async def get_examples_for_prompt(
     if web_text:
         return _format_web_results(web_text)
 
-    logger.info("[RAG] No examples found from DB or web search")
-    return ""
+    logger.info("[RAG] No examples found from DB or web search, using generic fallback")
+    return _generic_fallback_example()
