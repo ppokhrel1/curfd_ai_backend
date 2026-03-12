@@ -62,13 +62,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
 
-    # Code generation LLM (separate from agent chat for higher quality)
-    code_gen_model: str | None = None  # Override model for code gen; defaults to llm_model
-    code_gen_temperature: float = 0.1  # Lower = more deterministic code output
-    code_gen_max_tokens: int = 32000   # Longer for complex industrial parts
-
     # Agent configuration
     agent_max_iterations: int = 5
+
+    # Code generation LLM (hardcoded, not env-configurable)
+    code_gen_model: str | None = None  # uses llm_model by default
+    code_gen_temperature: float = 0.1
+    code_gen_max_tokens: int = 32000
 
     runpod_base_url: str = "https://api.runpod.ai/v2/k91olo35clkkky"
     runpod_api_token: str | None = None
