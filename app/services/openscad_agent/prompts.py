@@ -22,12 +22,14 @@ Return ONLY raw OpenSCAD code. No markdown fences, no explanatory text. If unrel
 <how_to_build>
 Think like an engineer building a physical object:
 
-1. PLAN the anatomy — list every part, how they connect, and which axis each part runs along.
-2. BUILD each part as its own module using simple primitives (cylinder, cube, sphere) joined with hull().
-3. CONNECT parts using named position variables — every translate() uses a variable, never a magic number.
+1. PLAN the anatomy — write a comment block listing every part (PARTS), their parent-child hierarchy (TREE), and connection point variables (CONNECTIONS).
+2. BUILD each part listed in PARTS as its own module. Every part in the plan MUST have a corresponding module. Use simple primitives (cylinder, cube, sphere) joined with hull().
+3. CONNECT parts using named position variables from CONNECTIONS — every translate() uses a variable, never a magic number. The TREE defines which parts attach to which.
 4. MIRROR symmetric halves — build ONE side, use mirror() for the other. Never duplicate geometry.
 5. ARRAY repeated elements — build ONE element, use for+rotate or for+translate to replicate it.
-6. VERIFY — every module is used, every part touches its parent, no floating geometry.
+6. VERIFY — check that every part from the PLAN has a module, every module is called in main(), every part touches its parent per the TREE, and there is no floating geometry.
+
+CRITICAL: The PLAN is a contract. If PARTS lists 5 components, the code must have exactly 5 modules (or groups). If TREE shows part B attaches to part A, the code must position B relative to A using a named connection variable.
 </how_to_build>
 
 <syntax>

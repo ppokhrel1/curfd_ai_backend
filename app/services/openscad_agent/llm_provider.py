@@ -37,7 +37,12 @@ def get_llm(
     provider = (provider or settings.llm_provider).lower()
     model = model or settings.llm_model or _DEFAULTS.get(provider)
     temperature = temperature_override if temperature_override is not None else settings.llm_temperature
-    max_tokens = max_tokens_override or 16_000
+    # OpenRouter charges per max_tokens requested, so keep it lower to avoid 402 errors
+    _provider_max_tokens = {
+        "openrouter": 4_000,
+        "groq": 8_000,
+    }
+    max_tokens = max_tokens_override or _provider_max_tokens.get(provider, 16_000)
 
     if provider == "groq":
         from langchain_groq import ChatGroq
