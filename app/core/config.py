@@ -57,10 +57,15 @@ class Settings(BaseSettings):
     # LLM provider configuration
     llm_provider: str = "anthropic"  # "groq" | "gemini" | "openai" | "anthropic" | "openrouter"
     llm_model: str | None = None  # Override model name, or use provider default
-    llm_temperature: float = 0.2
+    llm_temperature: float = 0.3
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
+
+    # Code generation LLM (separate from agent chat for higher quality)
+    code_gen_model: str | None = None  # Override model for code gen; defaults to llm_model
+    code_gen_temperature: float = 0.1  # Lower = more deterministic code output
+    code_gen_max_tokens: int = 32000   # Longer for complex industrial parts
 
     # Agent configuration
     agent_max_iterations: int = 5

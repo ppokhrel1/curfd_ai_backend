@@ -33,8 +33,18 @@ def _get_components(provider: str | None = None, model: str | None = None, think
     tools_supported = resolved_provider not in ("groq",)
     llm_with_tools = llm.bind_tools(_tools) if tools_supported else None
 
+    # Separate code-gen LLM with lower temperature and higher token limit
+    code_llm = get_llm(
+        provider,
+        settings.code_gen_model or model,
+        thinking,
+        temperature_override=settings.code_gen_temperature,
+        max_tokens_override=settings.code_gen_max_tokens,
+    )
+
     return {
         "llm": llm,
+        "code_llm": code_llm,
         "llm_with_tools": llm_with_tools,
         "tools_supported": tools_supported,
         "provider": resolved_provider,
@@ -135,7 +145,7 @@ async def _generate_code(
 
     code_messages.append(HumanMessage(content=user_text))
 
-    llm = components["llm"]
+    llm = components["code_llm"]
     result = await llm.ainvoke(code_messages)
     code = _extract_text_content(result)
 
@@ -171,7 +181,7 @@ async def _generate_code_stream(
 
     code_messages.append(HumanMessage(content=user_text))
 
-    llm = components["llm"]
+    llm = components["code_llm"]
     async for chunk in llm.astream(code_messages):
         token = _extract_text_content(chunk)
         if token:
@@ -450,7 +460,7 @@ async def run_agent(
     if image_data_urls:
         human_msg = _build_human_message(user_input, image_data_urls)
         messages = [SystemMessage(content=CODE_PROMPT)] + list(history) + [human_msg]
-        result = await c["llm"].ainvoke(messages)
+        result = await c["code_llm"].ainvoke(messages)
         agent_output = _extract_text_content(result)
     elif c["tools_supported"] and c["llm_with_tools"] is not None:
         try:
@@ -461,11 +471,11 @@ async def run_agent(
         except Exception as e:
             logger.error(f"Tool loop failed, falling back to direct generation: {e}")
             msgs = _build_direct_generation_messages(user_input, history)
-            result = await c["llm"].ainvoke(msgs)
+            result = await c["code_llm"].ainvoke(msgs)
             agent_output = _extract_text_content(result)
     else:
         msgs = _build_direct_generation_messages(user_input, history)
-        result = await c["llm"].ainvoke(msgs)
+        result = await c["code_llm"].ainvoke(msgs)
         agent_output = _extract_text_content(result)
 
     logger.info(f"Agent output (first 300 chars): {agent_output[:300]}")
@@ -528,10 +538,10 @@ async def run_agent_stream(
         if use_tools:
             stream_source = c["llm_with_tools"].astream(messages)
         elif image_data_urls:
-            stream_source = c["llm"].astream(messages)
+            stream_source = c["code_llm"].astream(messages)
         else:
             msgs = _build_direct_generation_messages(user_input, history)
-            stream_source = c["llm"].astream(msgs)
+            stream_source = c["code_llm"].astream(msgs)
 
         try:
             async for chunk in stream_source:
