@@ -132,11 +132,42 @@ hull() {
     translate([dx, dy, dz]) cylinder(r=r2, h=eps, $fn=32);
 }
 
-# COORDINATE SYSTEM
+# COORDINATE SYSTEM & SPATIAL REASONING (CRITICAL)
+
+## Axes
 - X = left/right, Y = front/back, Z = up. Ground plane at Z = 0.
 - cylinder(h, r) grows along +Z only.
 - For Y-axis cylinder: rotate([-90, 0, 0])
 - For X-axis cylinder: rotate([0, 90, 0])
+
+## Assembly Connection Rules
+Every sub-assembly MUST physically connect to its parent. Before placing a part:
+1. Identify WHERE it attaches (the interface surface and its coordinates).
+2. Compute the translate() from the parent's interface, using ONLY parameter-derived values.
+3. Verify the connection: the child's geometry must overlap the parent by at least `eps` at the joint.
+
+NEVER position parts using manual trigonometry (sin/cos) for assembly placement.
+Use translate()/rotate() chains instead — they are composable and debuggable.
+
+## Part Origin Convention
+Design each module with its origin at the bottom-center of its primary attachment face.
+- A vertical column: origin at center of its base circle.
+- A horizontal arm: origin at the center of its mounting end.
+- A plate/stage: origin at its center-bottom.
+This ensures translate() in main() maps directly to the attachment point on the parent.
+
+## Assembly Positioning Checklist (apply for EVERY part in main())
+- Ground rule: The lowest part sits at Z=0. Everything stacks from there.
+- Stack rule: Part B sits on Part A → translate Z = A_base_z + A_height - eps.
+- Side-mount rule: Part C attaches to the side of Part A → translate to A's center ± A's radius/half-width.
+- Coaxial rule: Parts sharing an axis (column + base) → same X,Y center.
+- No floating parts: every part must touch or overlap at least one other part.
+
+## Complexity Management
+For complex objects (>4 components), decompose into sub-assemblies:
+- Define connection-point variables (e.g., `arm_mount_z = base_height + column_height * 0.7;`)
+- Each sub-assembly module positions its own children relative to its own origin.
+- main() only positions top-level sub-assemblies, not individual bolts/details.
 
 # STL IMPORT
 When told to use import() for an uploaded STL:
