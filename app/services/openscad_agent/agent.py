@@ -4,9 +4,11 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.openscad_agent.llm_provider import get_llm
 from app.services.openscad_agent.prompts import AGENT_PROMPT, CODE_PROMPT
+from app.services.openscad_agent.example_retriever import get_examples_for_prompt
 from app.services.openscad_agent.tools import (
     apply_parameter_changes,
     build_parametric_model,
@@ -85,9 +87,11 @@ def _extract_text_content(response) -> str:
 def _build_direct_generation_messages(
     user_input: str,
     history: list[HumanMessage | AIMessage],
+    rag_context: str = "",
 ) -> list:
     """Build messages for direct code generation (no tools, uses CODE_PROMPT)."""
-    return [SystemMessage(content=CODE_PROMPT)] + list(history) + [HumanMessage(content=user_input)]
+    prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+    return [SystemMessage(content=prompt)] + list(history) + [HumanMessage(content=user_input)]
 
 
 def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> str:
@@ -118,11 +122,12 @@ async def _generate_code(
     history: list[HumanMessage | AIMessage],
     components: dict,
     user_input: str = "",
+    rag_context: str = "",
 ) -> str:
     """Make a separate LLM call with CODE_PROMPT to generate OpenSCAD code.
 
     Matches CADAM's handleToolCall pattern:
-    - System: STRICT_CODE_PROMPT
+    - System: STRICT_CODE_PROMPT (+ RAG examples if available)
     - ...full conversation history (history already excludes current user msg)
     - (optional) Assistant: baseCode
     - User: original user request (+ error context if present)
@@ -130,8 +135,9 @@ async def _generate_code(
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    # Build code generation messages (CADAM pattern)
-    code_messages: list = [SystemMessage(content=CODE_PROMPT)]
+    # Build code generation messages (CADAM pattern) with RAG context
+    prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+    code_messages: list = [SystemMessage(content=prompt)]
     code_messages.extend(history)
 
     # Add base code context if modifying existing model
@@ -160,15 +166,18 @@ async def _generate_code_stream(
     history: list[HumanMessage | AIMessage],
     components: dict,
     user_input: str = "",
+    rag_context: str = "",
 ) -> AsyncGenerator[str, None]:
     """Stream code generation tokens from a separate LLM call with CODE_PROMPT.
 
     Matches CADAM's pattern: uses original user_input, not tool's paraphrased text.
+    RAG context is appended to CODE_PROMPT when available.
     """
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    code_messages: list = [SystemMessage(content=CODE_PROMPT)]
+    prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+    code_messages: list = [SystemMessage(content=prompt)]
     code_messages.extend(history)
 
     if base_code:
@@ -219,11 +228,12 @@ async def _run_tool_loop(
     max_iterations: int,
     components: dict,
     image_data_urls: list[str] | None = None,
+    rag_context: str = "",
 ) -> str:
     """
     Manual tool-calling loop matching CADAM's pattern:
     - Outer agent uses AGENT_PROMPT with tools
-    - build_parametric_model → separate LLM call with CODE_PROMPT
+    - build_parametric_model → separate LLM call with CODE_PROMPT + RAG
     - apply_parameter_changes → regex patching of current code
     """
     llm_with_tools = components["llm_with_tools"]
@@ -245,8 +255,8 @@ async def _run_tool_loop(
             tool_id = tool_call.get("id", tool_name)
 
             if tool_name == "build_parametric_model":
-                # CADAM pattern: separate LLM call with CODE_PROMPT
-                code = await _generate_code(tool_args, history, components, user_input)
+                # CADAM pattern: separate LLM call with CODE_PROMPT + RAG context
+                code = await _generate_code(tool_args, history, components, user_input, rag_context)
                 logger.info(f"Code generation returned {len(code)} chars")
                 return code
 
@@ -453,28 +463,40 @@ async def run_agent(
     provider: str | None = None,
     model: str | None = None,
     thinking: bool = False,
+    db: AsyncSession | None = None,
 ) -> OpenSCADResponse:
     """Run agent and return structured OpenSCADResponse."""
     c = _get_components(provider, model, thinking)
 
+    # Fetch RAG examples if DB session is available
+    rag_context = ""
+    if db:
+        try:
+            rag_context = await get_examples_for_prompt(db, user_input)
+            if rag_context:
+                logger.info(f"[RAG] Injecting {len(rag_context)} chars of context into prompt")
+        except Exception as e:
+            logger.warning(f"[RAG] Failed to fetch examples: {e}")
+
     if image_data_urls:
         human_msg = _build_human_message(user_input, image_data_urls)
-        messages = [SystemMessage(content=CODE_PROMPT)] + list(history) + [human_msg]
+        prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+        messages = [SystemMessage(content=prompt)] + list(history) + [human_msg]
         result = await c["code_llm"].ainvoke(messages)
         agent_output = _extract_text_content(result)
     elif c["tools_supported"] and c["llm_with_tools"] is not None:
         try:
             agent_output = await _run_tool_loop(
                 user_input, history, settings.agent_max_iterations,
-                c,
+                c, rag_context=rag_context,
             )
         except Exception as e:
             logger.error(f"Tool loop failed, falling back to direct generation: {e}")
-            msgs = _build_direct_generation_messages(user_input, history)
+            msgs = _build_direct_generation_messages(user_input, history, rag_context)
             result = await c["code_llm"].ainvoke(msgs)
             agent_output = _extract_text_content(result)
     else:
-        msgs = _build_direct_generation_messages(user_input, history)
+        msgs = _build_direct_generation_messages(user_input, history, rag_context)
         result = await c["code_llm"].ainvoke(msgs)
         agent_output = _extract_text_content(result)
 
@@ -498,15 +520,17 @@ async def run_agent_stream(
     provider: str | None = None,
     model: str | None = None,
     thinking: bool = False,
+    db: AsyncSession | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     LLM streaming with tool call support (CADAM pattern).
 
     Flow:
-    1. Stream outer agent (AGENT_PROMPT) text tokens
-    2. On build_parametric_model tool call → separate code gen with CODE_PROMPT
-    3. On apply_parameter_changes tool call → regex patch current code
-    4. Fallback: extract OpenSCAD from text if no tool was used
+    1. Fetch RAG examples from DB (vector search) or web search
+    2. Stream outer agent (AGENT_PROMPT) text tokens
+    3. On build_parametric_model tool call → separate code gen with CODE_PROMPT + RAG
+    4. On apply_parameter_changes tool call → regex patch current code
+    5. Fallback: extract OpenSCAD from text if no tool was used
 
     Yields:
         {"type": "token", "text": "..."} for each text token
@@ -516,6 +540,16 @@ async def run_agent_stream(
     c = _get_components(provider, model, thinking)
     logger.info(f"[STREAM] provider={c['provider']}, model={model}, thinking={thinking}")
 
+    # Fetch RAG context
+    rag_context = ""
+    if db:
+        try:
+            rag_context = await get_examples_for_prompt(db, user_input)
+            if rag_context:
+                logger.info(f"[STREAM][RAG] Injecting {len(rag_context)} chars of context")
+        except Exception as e:
+            logger.warning(f"[STREAM][RAG] Failed to fetch examples: {e}")
+
     human_msg = _build_human_message(user_input, image_data_urls)
 
     use_tools = (
@@ -524,8 +558,11 @@ async def run_agent_stream(
         and c["llm_with_tools"] is not None
     )
 
-    # Use AGENT_PROMPT for tool mode, CODE_PROMPT for direct generation
-    system_prompt = AGENT_PROMPT if use_tools else CODE_PROMPT
+    # Use AGENT_PROMPT for tool mode, CODE_PROMPT (+ RAG) for direct generation
+    if use_tools:
+        system_prompt = AGENT_PROMPT
+    else:
+        system_prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
     messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]
 
     full_text = ""
@@ -540,7 +577,7 @@ async def run_agent_stream(
         elif image_data_urls:
             stream_source = c["code_llm"].astream(messages)
         else:
-            msgs = _build_direct_generation_messages(user_input, history)
+            msgs = _build_direct_generation_messages(user_input, history, rag_context)
             stream_source = c["code_llm"].astream(msgs)
 
         try:
@@ -570,12 +607,12 @@ async def run_agent_stream(
                 tool_args = tool_call["args"]
 
                 if tool_name == "build_parametric_model":
-                    # CADAM pattern: separate code generation call
+                    # CADAM pattern: separate code generation call with RAG context
                     yield {"type": "tool", "tool_name": tool_name, "status": "generating"}
 
                     try:
                         code_tokens = []
-                        async for token in _generate_code_stream(tool_args, history, c, user_input):
+                        async for token in _generate_code_stream(tool_args, history, c, user_input, rag_context):
                             code_tokens.append(token)
                             yield {"type": "token", "text": token}
 

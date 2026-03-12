@@ -232,7 +232,7 @@ async def gemini_openscad_generate_route(
         # 2. Build smart history (includes previous OpenSCAD code for iterative refinement)
         history = await _build_lc_history(db, payload.chat_id)
 
-        # 3. Run LangChain agent with tools (validation, parameter analysis, doc search)
+        # 3. Run LangChain agent with tools + RAG examples
         response: OpenSCADResponse = await run_agent(
             user_input=payload.content,
             history=history,
@@ -240,6 +240,7 @@ async def gemini_openscad_generate_route(
             provider=payload.llm_provider,
             model=payload.llm_model,
             thinking=payload.llm_thinking,
+            db=db,
         )
 
         # 4. Extract fields (already validated by schema)
@@ -332,6 +333,7 @@ async def stream_openscad_generate(
                 provider=payload.llm_provider,
                 model=payload.llm_model,
                 thinking=payload.llm_thinking,
+                db=db,
             ):
                 if event["type"] == "token":
                     yield f"event: token\ndata: {json.dumps({'text': event['text']})}\n\n"
