@@ -76,12 +76,20 @@ Dimensions in mm, realistic real-world scale.
 - Wall: >=1.5mm (2mm structural). Holes: >=2mm, add 0.4mm for FDM compensation.
 - Clearance: 0.3mm default. Overhang: <=45deg. Bridge: <=10mm.
 
+# AXIS CONVENTIONS
+
+- Objects sit on XY plane, Z is up. Tallest dimension along Z.
+- Vehicles/planes: fuselage along Y (length), wings along X (span), Z is up.
+- Keep placement simple: prefer translate() over rotation chains. Never chain >2 rotations.
+- If a module is defined but not used in main(), DELETE it. No dead code.
+
 # ASSEMBLY RULES
 
 - Every part MUST physically connect to its parent (overlap by eps at joint).
-- No floating parts. No manual sin/cos for placement — use translate/rotate chains.
+- No floating parts. Use translate() with named offset variables — NOT manual sin/cos.
 - Stack: Z = parent_z + parent_height - eps. Coaxial parts share X,Y.
 - Complex objects (>4 parts): define connection-point variables, use sub-assembly modules.
+- Place each part with ONE translate() call using derived position variables. No nested rotate/translate chains.
 
 # PATTERNS
 
