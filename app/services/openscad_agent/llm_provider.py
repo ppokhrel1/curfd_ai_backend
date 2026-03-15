@@ -13,7 +13,6 @@ _DEFAULTS = {
     "gemini": "gemini-2.5-flash",
     "openai": "gpt-4o",
     "anthropic": "claude-opus-4-6",
-    "openrouter": "anthropic/claude-sonnet-4",
 }
 
 # Providers that support extended thinking
@@ -37,9 +36,7 @@ def get_llm(
     provider = (provider or settings.llm_provider).lower()
     model = model or settings.llm_model or _DEFAULTS.get(provider)
     temperature = temperature_override if temperature_override is not None else settings.llm_temperature
-    # OpenRouter charges per max_tokens requested, so keep it lower to avoid 402 errors
     _provider_max_tokens = {
-        "openrouter": 4_000,
         "groq": 8_000,
     }
     max_tokens = max_tokens_override or _provider_max_tokens.get(provider, 16_000)
@@ -87,19 +84,5 @@ def get_llm(
             logger.info(f"[LLM] Creating Anthropic LLM: model={model}, temp={temperature}, max_tokens={max_tokens}")
 
         return ChatAnthropic(**kwargs)
-    elif provider == "openrouter":
-        from langchain_openai import ChatOpenAI
-
-        return ChatOpenAI(
-            model=model,
-            api_key=settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY"),
-            base_url="https://openrouter.ai/api/v1",
-            temperature=temperature,
-            max_tokens=max_tokens,
-            default_headers={
-                "HTTP-Referer": settings.frontend_url or "https://nooriat.com",
-                "X-Title": "CURFD AI",
-            },
-        )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

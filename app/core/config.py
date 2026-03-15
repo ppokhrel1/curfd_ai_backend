@@ -55,12 +55,11 @@ class Settings(BaseSettings):
     replicate_api_token: str | None = None
 
     # LLM provider configuration
-    llm_provider: str = "anthropic"  # "groq" | "gemini" | "openai" | "anthropic" | "openrouter"
+    llm_provider: str = "anthropic"  # "groq" | "gemini" | "openai" | "anthropic"
     llm_model: str | None = None  # Override model name, or use provider default
     llm_temperature: float = 0.3
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
-    openrouter_api_key: str | None = None
 
     # Agent configuration
     agent_max_iterations: int = 5
