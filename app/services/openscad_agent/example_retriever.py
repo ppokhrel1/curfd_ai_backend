@@ -136,6 +136,22 @@ async def _vector_search(db: AsyncSession, user_input: str, is_jewelry: bool = F
 # ── Web search fallback ─────────────────────────────────────────────────────
 
 
+_NON_MECHANICAL_KEYWORDS = frozenset({
+    "anime", "manga", "character", "figure", "figurine", "chibi",
+    "naruto", "goku", "pikachu", "pokemon", "gundam", "dragon ball",
+    "superhero", "villain", "cartoon", "mascot", "plushie", "toy",
+    "statue", "bust", "sculpture", "person", "human", "face", "head",
+    "animal", "cat", "dog", "bird", "fish", "dragon", "monster",
+    "zombie", "skeleton", "skull", "robot", "mech", "transformer",
+})
+
+
+def _is_mechanical_query(user_input: str) -> bool:
+    """Check if query is about mechanical/CAD parts (where web search helps)."""
+    lower = user_input.lower()
+    return not any(kw in lower for kw in _NON_MECHANICAL_KEYWORDS)
+
+
 def _extract_keywords(user_input: str) -> list[str]:
     """Extract meaningful keywords from user input for web search."""
     stopwords = {
@@ -152,17 +168,18 @@ def _extract_keywords(user_input: str) -> list[str]:
 async def _web_search_examples(user_input: str) -> str:
     """Fall back to web search for the shape of the object."""
     try:
-        from langchain_community.tools import DuckDuckGoSearchRun
+        from ddgs import DDGS
 
-        search = DuckDuckGoSearchRun()
         keywords = _extract_keywords(user_input)
         query = f"OpenSCAD code {' '.join(keywords[:4])} shape dimensions mm"
         logger.info(f"[RAG] Web search fallback: {query}")
-        results = await search.ainvoke(query)
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
         if results:
-            return results[:3000]
+            text = "\n".join(r.get("body", "") for r in results)
+            return text[:3000]
     except ImportError:
-        logger.warning("[RAG] duckduckgo-search not installed, skipping web search fallback")
+        logger.warning("[RAG] ddgs not installed, skipping web search fallback")
     except Exception as e:
         logger.warning(f"[RAG] Web search failed: {e}")
     return ""
@@ -232,11 +249,14 @@ async def get_examples_for_prompt(
         if examples_with_code:
             return _format_examples(examples_with_code)
 
-    # Fallback: web search for the shape of the object
-    logger.info("[RAG] No DB matches, trying web search for shape")
-    web_text = await _web_search_examples(user_input)
-    if web_text:
-        return _format_web_results(web_text)
+    # Fallback: web search — only for mechanical/CAD queries (not anime characters etc.)
+    if _is_mechanical_query(user_input):
+        logger.info("[RAG] No DB matches, trying web search for shape")
+        web_text = await _web_search_examples(user_input)
+        if web_text:
+            return _format_web_results(web_text)
+    else:
+        logger.info("[RAG] Non-mechanical query, skipping web search fallback")
 
     logger.info("[RAG] No examples found from DB or web search, using generic fallback")
     return _generic_fallback_example()

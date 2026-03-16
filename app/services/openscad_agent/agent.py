@@ -1,8 +1,9 @@
+import asyncio
 import logging
 import re
 import time
 from collections.abc import AsyncGenerator
-from functools import lru_cache
+
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,18 +46,18 @@ _tools = [apply_parameter_changes, build_parametric_model, search_reference_imag
 _tools_by_name = {t.name: t for t in _tools}
 
 
-# ── Cached component factory ─────────────────────────────────────────────────
+# ── Component factory ────────────────────────────────────────────────────────
 
-@lru_cache(maxsize=16)
 def _get_components(provider: str | None = None, model: str | None = None, thinking: bool = False):
-    """Lazily create and cache LLM + chains for a given provider/model pair."""
-    llm = get_llm(provider, model, thinking)
+    """Create LLM + chains for a given provider/model pair."""
+    # Agent (tool routing) never needs thinking — it just picks tools
+    llm = get_llm(provider, model, False)
     resolved_provider = (provider or settings.llm_provider).lower()
 
     tools_supported = resolved_provider in ("anthropic",)
     llm_with_tools = llm.bind_tools(_tools) if tools_supported else None
 
-    # Separate code-gen LLM with lower temperature and higher token limit
+    # Code-gen LLM gets thinking if user requested it (this is where it matters)
     code_llm = get_llm(
         provider,
         settings.code_gen_model or model,
@@ -427,14 +428,15 @@ def _validate_code_quality(code: str) -> dict:
     planned = [p.strip() for p in plan_parts[0].split(',')]  if plan_parts else []
     metrics["planned_parts"] = len(planned)
 
-    # 2. Defined modules (parameterless, excluding main)
-    defined = re.findall(r'^\s*module\s+([a-zA-Z_]\w*)\s*\(\s*\)', code, re.MULTILINE)
+    # 2. Defined modules (including parameterized ones, excluding main)
+    defined = re.findall(r'^\s*module\s+([a-zA-Z_]\w*)\s*\(', code, re.MULTILINE)
     defined = [m for m in defined if m not in ('main',)]
     metrics["defined_modules"] = len(defined)
 
-    # 3. Modules called in main()
+    # 3. Count module calls in main() (including repeated calls like arm(1), arm(-1))
     main_match = re.search(r'module\s+main\s*\(\s*\)\s*\{', code)
     called_in_main = []
+    call_count_in_main = 0
     if main_match:
         depth, i = 1, main_match.end()
         while i < len(code) and depth > 0:
@@ -442,42 +444,51 @@ def _validate_code_quality(code: str) -> dict:
             elif code[i] == '}': depth -= 1
             i += 1
         main_body = code[main_match.end():i - 1] if depth == 0 else ""
-        called_in_main = list(set(re.findall(r'\b([a-zA-Z_]\w*)\s*\(', main_body)))
-        called_in_main = [c for c in called_in_main if c in defined]
+        all_calls = re.findall(r'\b([a-zA-Z_]\w*)\s*\(', main_body)
+        called_in_main = list(set(c for c in all_calls if c in defined))
+        # Count total calls (arm called twice = 2 parts)
+        call_count_in_main = sum(1 for c in all_calls if c in defined)
     metrics["called_in_main"] = len(called_in_main)
+    metrics["call_count_in_main"] = call_count_in_main
 
-    # 4. Connection point variables
+    # 4. Count mirror() uses in main (each mirror doubles a part)
+    if main_match:
+        mirror_count = len(re.findall(r'\bmirror\s*\(', main_body))
+        call_count_in_main += mirror_count  # each mirror effectively doubles
+    metrics["effective_parts"] = call_count_in_main
+
+    # 5. Connection point variables
     conn_vars = re.findall(r'^\s*([a-zA-Z_]\w*(?:_[xyz]|_offset|_pos|_attach|_z|_y|_x))\s*=', code, re.MULTILINE)
     metrics["connection_vars"] = len(conn_vars)
 
-    # 5. Magic numbers in translate (numbers not from variables)
+    # 6. Magic numbers in translate (numbers not from variables)
     translates = re.findall(r'translate\(\[([^\]]+)\]', code)
     magic_count = 0
     for t in translates:
-        nums = re.findall(r'(?<![a-zA-Z_])\d+\.?\d*', t)
-        # Allow 0, eps, and small constants
-        magic_count += sum(1 for n in nums if float(n) > 1)
+        # Only count bare numeric literals > 5 (small offsets are OK)
+        nums = re.findall(r'(?<![a-zA-Z_\.])\d+\.?\d*', t)
+        magic_count += sum(1 for n in nums if float(n) > 5)
     metrics["magic_numbers_in_translate"] = magic_count
 
-    # 6. Uncalled modules (defined but not called in main)
+    # 7. Uncalled modules (defined but not called in main)
     uncalled = [m for m in defined if m not in called_in_main]
     metrics["uncalled_modules"] = len(uncalled)
 
-    # 7. Has eps usage
+    # 8. Has eps usage
     metrics["uses_eps"] = bool(re.search(r'\beps\b', code))
 
-    # 8. Has TREE comment
+    # 9. Has TREE comment
     metrics["has_tree"] = bool(re.search(r'//\s*TREE:', code))
 
-    # Log structured metrics
+    # Log structured metrics — use effective_parts for comparison
     issues = []
-    if metrics["planned_parts"] > 0 and metrics["defined_modules"] < metrics["planned_parts"]:
+    if metrics["planned_parts"] > 0 and metrics["effective_parts"] < metrics["planned_parts"] - 1:
         issues.append("parts_mismatch")
     if metrics["defined_modules"] > 0 and metrics["called_in_main"] < metrics["defined_modules"]:
         issues.append("uncalled_modules")
     if metrics["connection_vars"] == 0:
         issues.append("no_connections")
-    if metrics["magic_numbers_in_translate"] > 3:
+    if metrics["magic_numbers_in_translate"] > 5:
         issues.append("magic_numbers")
     if not metrics["uses_eps"]:
         issues.append("no_eps")
@@ -486,9 +497,9 @@ def _validate_code_quality(code: str) -> dict:
     metrics["status"] = "PASS" if not issues else "WARN"
 
     logger.info(
-        "[QUALITY] %s | planned=%d modules=%d called=%d conn=%d magic=%d tree=%s issues=%s",
+        "[QUALITY] %s | planned=%d modules=%d called=%d effective=%d conn=%d magic=%d tree=%s issues=%s",
         metrics["status"], metrics["planned_parts"], metrics["defined_modules"],
-        metrics["called_in_main"], metrics["connection_vars"],
+        metrics["called_in_main"], metrics["effective_parts"], metrics["connection_vars"],
         metrics["magic_numbers_in_translate"], metrics["has_tree"], issues or "none",
     )
 
@@ -610,16 +621,25 @@ async def run_agent(
     c = _get_components(provider, model, thinking)
     logger.info(f"[AGENT] Starting request: provider={c['provider']}, model={model}, thinking={thinking}")
 
-    # Fetch RAG examples if DB session is available
+    # Start RAG fetch in parallel with agent work
     rag_context = ""
+    rag_task: asyncio.Task | None = None
     if db:
-        try:
-            t_rag = time.monotonic()
-            is_jewelry = _detect_jewelry(user_input)
-            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
-            logger.info(f"[AGENT][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
-        except Exception as e:
-            logger.warning(f"[AGENT][RAG] Failed to fetch examples: {e}")
+        async def _fetch_rag():
+            try:
+                t_rag = time.monotonic()
+                is_jewelry = _detect_jewelry(user_input)
+                ctx = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+                logger.info(f"[AGENT][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
+                return ctx
+            except Exception as e:
+                logger.warning(f"[AGENT][RAG] Failed to fetch examples: {e}")
+                return ""
+        rag_task = asyncio.create_task(_fetch_rag())
+
+    # Await RAG before code generation
+    if rag_task is not None:
+        rag_context = await rag_task
 
     experiment_meta = None
     if image_data_urls:
@@ -697,17 +717,6 @@ async def run_agent_stream(
     c = _get_components(provider, model, thinking)
     logger.info(f"[STREAM] Starting: provider={c['provider']}, model={model}, thinking={thinking}")
 
-    # Fetch RAG context
-    rag_context = ""
-    if db:
-        try:
-            t_rag = time.monotonic()
-            is_jewelry = _detect_jewelry(user_input)
-            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
-            logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
-        except Exception as e:
-            logger.warning(f"[STREAM][RAG] Failed: {e}")
-
     human_msg = _build_human_message(user_input, image_data_urls)
 
     use_tools = (
@@ -715,6 +724,32 @@ async def run_agent_stream(
         and c["tools_supported"]
         and c["llm_with_tools"] is not None
     )
+
+    # Start RAG fetch in parallel with agent routing (only needed at code-gen time)
+    rag_context = ""
+    rag_task: asyncio.Task | None = None
+    if db and use_tools:
+        # For tool-based flow: launch RAG in background, await when code gen starts
+        async def _fetch_rag():
+            try:
+                t_rag = time.monotonic()
+                is_jewelry = _detect_jewelry(user_input)
+                ctx = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+                logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
+                return ctx
+            except Exception as e:
+                logger.warning(f"[STREAM][RAG] Failed: {e}")
+                return ""
+        rag_task = asyncio.create_task(_fetch_rag())
+    elif db:
+        # For direct generation (no tools): need RAG before building prompt
+        try:
+            t_rag = time.monotonic()
+            is_jewelry = _detect_jewelry(user_input)
+            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+            logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
+        except Exception as e:
+            logger.warning(f"[STREAM][RAG] Failed: {e}")
 
     # Use AGENT_PROMPT for tool mode, CODE_PROMPT (+ domain + RAG) for direct generation
     experiment_meta = None
@@ -771,6 +806,11 @@ async def run_agent_stream(
                 tool_args = tool_call["args"]
 
                 if tool_name == "build_parametric_model":
+                    # Await RAG if it was running in parallel
+                    if rag_task is not None:
+                        rag_context = await rag_task
+                        rag_task = None
+
                     # CADAM pattern: separate code generation call with RAG context
                     yield {"type": "tool", "tool_name": tool_name, "status": "generating"}
 
@@ -841,6 +881,10 @@ async def run_agent_stream(
         else:
             break
 
+    # Cancel RAG task if it's still running (wasn't needed)
+    if rag_task is not None and not rag_task.done():
+        rag_task.cancel()
+
     # Fallback: if full_text contains OpenSCAD code but wasn't extracted via tools
     if not code_text and full_text:
         extracted = _extract_openscad_from_text(full_text)
@@ -858,6 +902,41 @@ async def run_agent_stream(
         from app.cadquery.tasks import _clean_scad
         code_text = _clean_scad(code_text)
         quality_metrics = _validate_code_quality(code_text)
+
+        # Self-correction: if severe issues found, ask LLM to fix
+        severe_issues = [i for i in quality_metrics.get("issues", [])
+                         if i in ("parts_mismatch", "uncalled_modules", "no_connections")]
+        if severe_issues and code_text:
+            logger.info(f"[QUALITY] Self-correcting: {severe_issues}")
+            fix_prompt = (
+                f"Fix this OpenSCAD code. Issues found: {', '.join(severe_issues)}.\n"
+                "Rules:\n"
+                "- Every planned part MUST have a module AND be called in main()\n"
+                "- All translate() values must use named connection variables, not magic numbers\n"
+                "- Parts must physically overlap parents (use eps for boolean joins)\n"
+                "- Arms hang DOWN from shoulders, legs extend DOWN from hips\n"
+                "Return ONLY the fixed OpenSCAD code, no explanations.\n\n"
+                f"{code_text}"
+            )
+            try:
+                fix_messages = [SystemMessage(content="Fix the OpenSCAD code as instructed. Return ONLY code."),
+                                HumanMessage(content=fix_prompt)]
+                yield {"type": "tool", "tool_name": "quality_fix", "status": "fixing"}
+                fixed_tokens = []
+                async for chunk in c["code_llm"].astream(fix_messages):
+                    token = _extract_text_content(chunk)
+                    if token:
+                        fixed_tokens.append(token)
+                        yield {"type": "token", "text": token}
+                fixed_code = _strip_code_fences("".join(fixed_tokens))
+                if _score_openscad_code(fixed_code) >= 3:
+                    code_text = _clean_scad(fixed_code)
+                    quality_metrics = _validate_code_quality(code_text)
+                    logger.info(f"[QUALITY] After fix: {quality_metrics.get('status')} issues={quality_metrics.get('issues')}")
+                yield {"type": "tool", "tool_name": "quality_fix", "status": "completed"}
+            except Exception as e:
+                logger.warning(f"[QUALITY] Self-correction failed: {e}")
+
         parameters = _extract_parameters_from_code(code_text)
         # Strip code blocks from agent text to get clean conversational message
         msg = re.sub(r'```[\s\S]*?```', '', agent_text).strip()
