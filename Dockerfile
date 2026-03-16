@@ -12,13 +12,17 @@ WORKDIR /app
 # If only code changes, this layer is skipped.
 COPY requirements.txt /app/requirements.txt
 
-# 2. Create the virtual environment
+# 2. Install build tools needed by native extensions (nlopt requires cmake)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. Create the virtual environment
 # We explicitly create the venv first at /app/.venv.
 RUN uv venv /app/.venv
 
-# 3. Install dependencies from requirements.txt
+# 4. Install dependencies from requirements.txt
 # We use the GLOBAL 'uv' executable, which automatically targets the newly created /app/.venv.
-# This fixes the "not found" error you were getting.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements.txt
 

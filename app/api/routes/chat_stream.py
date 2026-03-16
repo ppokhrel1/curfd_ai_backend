@@ -839,16 +839,22 @@ async def _handle_openscad_ws(
                 model_type = final_data.get("model_type", "chat")
                 message = final_data.get("message", "Model generated." if code else "Here to help!")
 
+                msg_meta = {
+                    "openscad_code": code,
+                    "parameters": parameters,
+                    "model_type": model_type,
+                    "message": message,
+                }
+                if final_data.get("experiment"):
+                    msg_meta["experiment"] = final_data["experiment"]
+                if final_data.get("quality_metrics"):
+                    msg_meta["quality_metrics"] = final_data["quality_metrics"]
+
                 ai_msg = MessageModel(
                     chat_id=chat_id,
                     role="assistant",
                     content=message,
-                    metadata_json={
-                        "openscad_code": code,
-                        "parameters": parameters,
-                        "model_type": model_type,
-                        "message": message,
-                    },
+                    metadata_json=msg_meta,
                 )
                 db.add(ai_msg)
                 await db.commit()

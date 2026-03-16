@@ -1480,202 +1480,6 @@ main();
 """,
     },
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # AIRCRAFT & DRONES
-    # ═══════════════════════════════════════════════════════════════════════
-
-    {
-        "name": "Simple Airplane",
-        "category": "vehicle",
-        "prompt": "single engine propeller airplane",
-        "code": """\
-$fn = 64;
-eps = 0.01;
-
-// --- Parameters ---
-fuse_length = 180;
-fuse_r = 14;
-wing_span = 200;
-wing_chord = 35;
-wing_t = 5;
-tail_hspan = 60;
-tail_hchord = 18;
-tail_ht = 3;
-tail_vheight = 30;
-tail_vchord = 22;
-tail_vt = 3;
-prop_hub_r = 5;
-prop_blade_len = 35;
-prop_blade_w = 8;
-prop_blade_t = 2;
-blade_count = 3;
-
-// --- Connection points ---
-wing_y = 20;
-wing_z = 2;
-tail_y = -fuse_length / 2 + 15;
-prop_y = fuse_length / 2;
-
-// --- Modules ---
-module fuselage() {
-    hull() {
-        translate([0, fuse_length / 2, 0]) sphere(r = 5);
-        translate([0, fuse_length / 4, 0]) sphere(r = fuse_r);
-        translate([0, -fuse_length / 4, 0]) sphere(r = fuse_r);
-        translate([0, -fuse_length / 2, 0]) sphere(r = 5);
-    }
-}
-
-module wing_half() {
-    // Tapered wing extending along +X
-    hull() {
-        translate([0, -wing_chord / 2, 0])
-            cube([eps, wing_chord, wing_t]);
-        translate([wing_span / 2, -wing_chord * 0.3, 0])
-            cube([eps, wing_chord * 0.5, wing_t * 0.6]);
-    }
-}
-
-module wings() {
-    translate([0, wing_y, wing_z]) {
-        wing_half();
-        mirror([1, 0, 0]) wing_half();
-    }
-}
-
-module h_stabilizer_half() {
-    hull() {
-        translate([0, -tail_hchord / 2, 0])
-            cube([eps, tail_hchord, tail_ht]);
-        translate([tail_hspan / 2, -tail_hchord * 0.3, 0])
-            cube([eps, tail_hchord * 0.4, tail_ht * 0.7]);
-    }
-}
-
-module h_stabilizer() {
-    translate([0, tail_y, 0]) {
-        h_stabilizer_half();
-        mirror([1, 0, 0]) h_stabilizer_half();
-    }
-}
-
-module v_stabilizer() {
-    translate([0, tail_y, fuse_r - 2])
-        hull() {
-            cube([tail_vt, tail_vchord, eps], center = true);
-            translate([0, -tail_vchord * 0.2, tail_vheight])
-                cube([tail_vt, tail_vchord * 0.4, eps], center = true);
-        }
-}
-
-module prop_blade() {
-    // Flat blade extending along +Z (radially outward from hub)
-    hull() {
-        cylinder(r = prop_blade_w / 4, h = prop_hub_r, center = true);
-        translate([prop_blade_t * 0.5, 0, prop_blade_len])
-            cube([prop_blade_t, prop_blade_w * 0.4, eps], center = true);
-    }
-}
-
-module propeller() {
-    translate([0, prop_y, 0])
-        rotate([-90, 0, 0]) {
-            // Hub
-            cylinder(r = prop_hub_r, h = 6);
-            // Blades — radial array perpendicular to shaft
-            for (i = [0 : blade_count - 1])
-                rotate([0, 0, i * 360 / blade_count])
-                    prop_blade();
-        }
-}
-
-module main() {
-    translate([0, 0, fuse_r + 20]) {
-        fuselage();
-        wings();
-        h_stabilizer();
-        v_stabilizer();
-        propeller();
-    }
-}
-
-main();
-""",
-    },
-    {
-        "name": "Quadcopter Drone Frame",
-        "category": "vehicle",
-        "prompt": "quadcopter drone frame with motor mounts",
-        "code": """\
-$fn = 64;
-eps = 0.01;
-
-// --- Parameters ---
-arm_length = 100;
-arm_w = 12;
-arm_h = 6;
-center_r = 30;
-center_h = 10;
-motor_mount_r = 10;
-motor_mount_h = 8;
-motor_bore_d = 5;
-arm_count = 4;
-screw_d = 3;
-screw_ring_r = 7;
-
-// --- Derived ---
-motor_x = arm_length;
-
-// --- Modules ---
-module center_plate() {
-    cylinder(r = center_r, h = center_h);
-}
-
-module arm() {
-    translate([-arm_w / 2, 0, (center_h - arm_h) / 2])
-        cube([arm_w, arm_length, arm_h]);
-}
-
-module motor_mount() {
-    translate([0, motor_x, 0])
-        difference() {
-            cylinder(r = motor_mount_r, h = motor_mount_h);
-            translate([0, 0, -eps])
-                cylinder(d = motor_bore_d, h = motor_mount_h + 2 * eps);
-            // Screw holes
-            for (i = [0 : 3])
-                rotate([0, 0, i * 90 + 45])
-                    translate([screw_ring_r, 0, -eps])
-                        cylinder(d = screw_d, h = motor_mount_h + 2 * eps);
-        }
-}
-
-module arms_and_motors() {
-    for (i = [0 : arm_count - 1])
-        rotate([0, 0, i * 360 / arm_count]) {
-            arm();
-            motor_mount();
-        }
-}
-
-module center_bore() {
-    translate([0, 0, -eps])
-        cylinder(d = 12, h = center_h + 2 * eps);
-}
-
-module main() {
-    difference() {
-        union() {
-            center_plate();
-            arms_and_motors();
-        }
-        center_bore();
-    }
-}
-
-main();
-""",
-    },
     {
         "name": "Rocket",
         "category": "vehicle",
@@ -2056,6 +1860,887 @@ module crown() {
 module main() {
     pavilion();
     crown();
+}
+
+main();
+""",
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INTRICATE JEWELRY — diamond rings, halo settings, pave bands
+    # ═══════════════════════════════════════════════════════════════════════
+
+    {
+        "name": "Halo Diamond Engagement Ring",
+        "category": "jewelry",
+        "prompt": "halo engagement ring with center diamond surrounded by small accent stones and pave band",
+        "code": """\
+// DESIGN: halo engagement ring — band, gallery basket, center diamond, halo of small stones, pave accent stones on band
+// PARTS: band, gallery, center_gem, halo_stones, pave_stones, prongs
+// TREE: band → gallery → center_gem + halo_stones + prongs, band → pave_stones
+// CONNECTIONS: setting_z, gem_z, halo_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 2.8;
+band_thickness = 1.6;
+
+center_gem_d = 6.5;
+center_gem_crown_h = 2;
+center_gem_pavilion_h = 4;
+gem_facets = 16;
+
+halo_count = 16;
+halo_stone_d = 1.4;
+halo_ring_r = 5;
+
+pave_count = 12;
+pave_stone_d = 1.2;
+pave_rows = 2;
+
+prong_count = 6;
+prong_w = 0.9;
+prong_h = 6;
+
+gallery_d = 11;
+gallery_h = 4;
+gallery_arch_count = 8;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+setting_z = band_outer_r;
+gem_z = setting_z + gallery_h - center_gem_pavilion_h + 1;
+halo_z = setting_z + gallery_h - 0.5;
+
+// --- Modules ---
+
+module band() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.3) offset(r = -0.3)
+            square([band_thickness, band_width], center = true);
+}
+
+module faceted_gem(d, crown_h, pav_h) {
+    cylinder(r1 = 0, r2 = d / 2, h = pav_h, $fn = gem_facets);
+    translate([0, 0, pav_h - eps])
+        cylinder(r1 = d / 2, r2 = d / 2 * 0.55, h = crown_h, $fn = gem_facets);
+}
+
+module gallery() {
+    translate([0, 0, setting_z])
+        difference() {
+            cylinder(d = gallery_d, h = gallery_h);
+            translate([0, 0, -eps])
+                cylinder(d = gallery_d - 2.4, h = gallery_h + 2 * eps);
+            for (i = [0 : gallery_arch_count - 1])
+                rotate([0, 0, i * 360 / gallery_arch_count])
+                    translate([gallery_d / 2, 0, gallery_h / 2])
+                        scale([1, 1, 1.5])
+                        rotate([90, 0, 0])
+                        cylinder(d = gallery_h * 0.6, h = 3, center = true, $fn = 32);
+        }
+}
+
+module prongs() {
+    translate([0, 0, setting_z])
+        for (i = [0 : prong_count - 1])
+            rotate([0, 0, i * 360 / prong_count])
+                translate([gallery_d / 2 - prong_w, -prong_w / 2, 0])
+                    hull() {
+                        cube([prong_w, prong_w, prong_h - 1]);
+                        translate([-0.3, 0, prong_h - 0.5])
+                            cube([prong_w * 0.6, prong_w, 0.5]);
+                    }
+}
+
+module halo_stones() {
+    translate([0, 0, halo_z])
+        for (i = [0 : halo_count - 1])
+            rotate([0, 0, i * 360 / halo_count])
+                translate([halo_ring_r, 0, 0])
+                    sphere(d = halo_stone_d, $fn = 12);
+}
+
+module pave_stones() {
+    for (row = [0 : pave_rows - 1]) {
+        row_offset = (row - (pave_rows - 1) / 2) * pave_stone_d * 1.1;
+        for (i = [0 : pave_count - 1]) {
+            angle = 50 + i * 260 / (pave_count - 1);
+            rotate([0, 0, angle])
+                translate([band_outer_r - 0.3, 0, row_offset])
+                    sphere(d = pave_stone_d, $fn = 10);
+        }
+    }
+}
+
+module main() {
+    band();
+    gallery();
+    prongs();
+    translate([0, 0, gem_z])
+        faceted_gem(center_gem_d, center_gem_crown_h, center_gem_pavilion_h);
+    halo_stones();
+    pave_stones();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Three Stone Trilogy Ring",
+        "category": "jewelry",
+        "prompt": "three stone trilogy engagement ring with center diamond flanked by two smaller stones",
+        "code": """\
+// DESIGN: three-stone ring — band with three prong-set gemstones in a row
+// PARTS: band, center_gem, side_gems, center_prongs, side_prongs
+// TREE: band → center_gem + center_prongs + side_gems + side_prongs
+// CONNECTIONS: setting_z, side_offset
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 2.5;
+band_thickness = 1.6;
+
+center_d = 6;
+center_crown = 1.8;
+center_pavilion = 3.5;
+
+side_d = 4;
+side_crown = 1.4;
+side_pavilion = 2.5;
+side_spacing = 6.5;
+
+prong_w = 0.8;
+prong_h_center = 5.5;
+prong_h_side = 4;
+prong_count = 4;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+setting_z = band_outer_r;
+
+// --- Modules ---
+
+module band() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.3) offset(r = -0.3)
+            square([band_thickness, band_width], center = true);
+}
+
+module gem(d, crown_h, pav_h) {
+    cylinder(r1 = 0, r2 = d / 2, h = pav_h, $fn = 16);
+    translate([0, 0, pav_h - eps])
+        cylinder(r1 = d / 2, r2 = d / 2 * 0.55, h = crown_h, $fn = 16);
+}
+
+module prong_set(gem_d, ph) {
+    for (i = [0 : prong_count - 1])
+        rotate([0, 0, i * 360 / prong_count + 45])
+            translate([gem_d / 2 - 0.2, -prong_w / 2, 0])
+                hull() {
+                    cube([prong_w, prong_w, ph - 0.8]);
+                    translate([-0.2, 0, ph - 0.5])
+                        cube([prong_w * 0.5, prong_w, 0.5]);
+                }
+}
+
+module main() {
+    band();
+
+    // Center stone
+    translate([0, 0, setting_z]) {
+        translate([0, 0, 1])
+            gem(center_d, center_crown, center_pavilion);
+        prong_set(center_d, prong_h_center);
+    }
+
+    // Side stones — mirror for symmetry
+    for (s = [-1, 1])
+        translate([0, s * side_spacing, setting_z]) {
+            translate([0, 0, 0.5])
+                gem(side_d, side_crown, side_pavilion);
+            prong_set(side_d, prong_h_side);
+        }
+}
+
+main();
+""",
+    },
+    {
+        "name": "Pave Eternity Band",
+        "category": "jewelry",
+        "prompt": "full eternity band ring with pave set diamonds all around",
+        "code": """\
+// DESIGN: eternity band — continuous ring of pave-set diamonds embedded in the band
+// PARTS: band_shell, pave_stones
+// TREE: band_shell → pave_stones (recessed into band)
+// CONNECTIONS: stone_ring_r
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 3.5;
+band_thickness = 2;
+stone_d = 1.6;
+stone_rows = 2;
+stones_per_row = 28;
+stone_depth = 0.4;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+stone_ring_r = band_outer_r - stone_depth;
+
+// --- Modules ---
+
+module band_shell() {
+    difference() {
+        rotate_extrude()
+            translate([band_inner_d / 2 + band_thickness / 2, 0])
+                offset(r = 0.4) offset(r = -0.4)
+                square([band_thickness, band_width], center = true);
+        // Drill holes for each stone
+        for (row = [0 : stone_rows - 1]) {
+            row_z = (row - (stone_rows - 1) / 2) * stone_d * 1.15;
+            offset_angle = row * (360 / stones_per_row / 2);
+            for (i = [0 : stones_per_row - 1])
+                rotate([0, 0, i * 360 / stones_per_row + offset_angle])
+                    translate([stone_ring_r, 0, row_z])
+                        sphere(d = stone_d * 1.05, $fn = 12);
+        }
+    }
+}
+
+module pave_stones() {
+    for (row = [0 : stone_rows - 1]) {
+        row_z = (row - (stone_rows - 1) / 2) * stone_d * 1.15;
+        offset_angle = row * (360 / stones_per_row / 2);
+        for (i = [0 : stones_per_row - 1])
+            rotate([0, 0, i * 360 / stones_per_row + offset_angle])
+                translate([stone_ring_r, 0, row_z])
+                    sphere(d = stone_d, $fn = 12);
+    }
+}
+
+module main() {
+    band_shell();
+    pave_stones();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Cathedral Setting Diamond Ring",
+        "category": "jewelry",
+        "prompt": "cathedral setting engagement ring with arched supports holding center diamond",
+        "code": """\
+// DESIGN: cathedral ring — band rises into arched supports that cradle the center stone
+// PARTS: band, cathedral_arches, setting_base, gem, prongs
+// TREE: band → cathedral_arches → setting_base → gem + prongs
+// CONNECTIONS: arch_peak_z, setting_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 2.5;
+band_thickness = 1.5;
+
+gem_d = 6.5;
+gem_crown = 2;
+gem_pavilion = 4;
+
+arch_width = 2.5;
+arch_thickness = 1.2;
+setting_d = 8;
+setting_h = 2;
+
+prong_count = 6;
+prong_w = 0.8;
+prong_h = 5;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+arch_peak_z = band_outer_r + 3;
+setting_z = arch_peak_z - 1;
+
+// --- Modules ---
+
+module band() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.3) offset(r = -0.3)
+            square([band_thickness, band_width], center = true);
+}
+
+module cathedral_arch() {
+    hull() {
+        translate([0, 0, band_outer_r - 1])
+            cube([arch_thickness, arch_width, 0.1], center = true);
+        translate([0, 0, arch_peak_z])
+            cube([arch_thickness, arch_width * 0.7, 0.1], center = true);
+    }
+}
+
+module cathedral_arches() {
+    for (angle = [0, 180])
+        rotate([0, 0, angle])
+            translate([0, 0, 0])
+            cathedral_arch();
+}
+
+module setting_base() {
+    translate([0, 0, setting_z])
+        difference() {
+            cylinder(d = setting_d, h = setting_h);
+            translate([0, 0, -eps])
+                cylinder(d = setting_d - 2, h = setting_h + 2 * eps);
+        }
+}
+
+module gem() {
+    translate([0, 0, setting_z + setting_h - gem_pavilion + 0.5]) {
+        cylinder(r1 = 0, r2 = gem_d / 2, h = gem_pavilion, $fn = 16);
+        translate([0, 0, gem_pavilion - eps])
+            cylinder(r1 = gem_d / 2, r2 = gem_d / 2 * 0.55, h = gem_crown, $fn = 16);
+    }
+}
+
+module prongs() {
+    translate([0, 0, setting_z])
+        for (i = [0 : prong_count - 1])
+            rotate([0, 0, i * 360 / prong_count])
+                translate([setting_d / 2 - prong_w, -prong_w / 2, 0])
+                    cube([prong_w, prong_w, prong_h]);
+}
+
+module main() {
+    band();
+    cathedral_arches();
+    setting_base();
+    gem();
+    prongs();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Split Shank Diamond Ring",
+        "category": "jewelry",
+        "prompt": "split shank engagement ring where band divides into two strands meeting at the center stone",
+        "code": """\
+// DESIGN: split shank ring — band splits into two strands that sweep up to cradle the setting
+// PARTS: shank_left, shank_right, bridge, setting, gem, prongs
+// TREE: shank_left + shank_right → bridge → setting → gem + prongs
+// CONNECTIONS: split_start_angle, setting_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_thickness = 1.5;
+band_width = 2.5;
+strand_width = 1.2;
+split_gap = 2;
+
+gem_d = 6;
+gem_crown = 1.8;
+gem_pavilion = 3.5;
+
+setting_d = 8;
+setting_h = 2;
+prong_count = 6;
+prong_w = 0.8;
+prong_h = 5;
+
+split_angle = 120;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+setting_z = band_outer_r + 1;
+half_r = band_inner_d / 2 + band_thickness / 2;
+
+// --- Modules ---
+
+module main_shank() {
+    rotate_extrude(angle = 360 - split_angle)
+        translate([half_r, 0])
+            offset(r = 0.2) offset(r = -0.2)
+            square([band_thickness, band_width], center = true);
+}
+
+module split_strand(offset_z) {
+    rotate([0, 0, 360 - split_angle])
+        rotate_extrude(angle = split_angle / 2)
+            translate([half_r, offset_z])
+                circle(d = strand_width);
+}
+
+module bridge() {
+    translate([0, 0, setting_z - 1])
+        cylinder(d = setting_d + 2, h = 1);
+}
+
+module setting() {
+    translate([0, 0, setting_z])
+        difference() {
+            cylinder(d = setting_d, h = setting_h);
+            translate([0, 0, -eps])
+                cylinder(d = setting_d - 2, h = setting_h + 2 * eps);
+        }
+}
+
+module gem() {
+    translate([0, 0, setting_z + setting_h - gem_pavilion + 0.5]) {
+        cylinder(r1 = 0, r2 = gem_d / 2, h = gem_pavilion, $fn = 16);
+        translate([0, 0, gem_pavilion - eps])
+            cylinder(r1 = gem_d / 2, r2 = gem_d / 2 * 0.55, h = gem_crown, $fn = 16);
+    }
+}
+
+module prongs() {
+    translate([0, 0, setting_z])
+        for (i = [0 : prong_count - 1])
+            rotate([0, 0, i * 360 / prong_count])
+                translate([setting_d / 2 - prong_w, -prong_w / 2, 0])
+                    cube([prong_w, prong_w, prong_h]);
+}
+
+module main() {
+    main_shank();
+    split_strand(split_gap / 2);
+    split_strand(-split_gap / 2);
+    bridge();
+    setting();
+    gem();
+    prongs();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Twisted Rope Band Diamond Ring",
+        "category": "jewelry",
+        "prompt": "twisted rope texture band ring with small diamond accent",
+        "code": """\
+// DESIGN: twisted rope ring — two intertwined wire strands forming the band, small accent gem on top
+// PARTS: strand_a, strand_b, accent_gem, accent_setting
+// TREE: strand_a + strand_b → accent_setting → accent_gem
+// CONNECTIONS: accent_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+wire_d = 1.8;
+twist_count = 12;
+twist_offset = 1.2;
+accent_gem_d = 2.5;
+accent_crown = 0.8;
+accent_pavilion = 1.5;
+bezel_wall = 0.6;
+
+// --- Derived ---
+band_r = band_inner_d / 2 + wire_d / 2;
+accent_z = band_r + wire_d / 2;
+
+// --- Modules ---
+
+module rope_strand(phase) {
+    steps = twist_count * 10;
+    for (i = [0 : steps - 1]) {
+        a1 = i * 360 / steps;
+        a2 = (i + 1) * 360 / steps;
+        t1 = phase + i * twist_count * 360 / steps;
+        t2 = phase + (i + 1) * twist_count * 360 / steps;
+        hull() {
+            rotate([0, 0, a1])
+                translate([band_r + twist_offset * cos(t1), 0, twist_offset * sin(t1)])
+                sphere(d = wire_d, $fn = 16);
+            rotate([0, 0, a2])
+                translate([band_r + twist_offset * cos(t2), 0, twist_offset * sin(t2)])
+                sphere(d = wire_d, $fn = 16);
+        }
+    }
+}
+
+module accent_gem() {
+    translate([band_r + twist_offset, 0, accent_z]) {
+        cylinder(r1 = 0, r2 = accent_gem_d / 2, h = accent_pavilion, $fn = 12);
+        translate([0, 0, accent_pavilion - eps])
+            cylinder(r1 = accent_gem_d / 2, r2 = accent_gem_d / 2 * 0.5, h = accent_crown, $fn = 12);
+    }
+}
+
+module accent_bezel() {
+    translate([band_r + twist_offset, 0, accent_z - 0.5])
+        difference() {
+            cylinder(d = accent_gem_d + bezel_wall * 2, h = accent_pavilion * 0.6);
+            translate([0, 0, -eps])
+                cylinder(d = accent_gem_d + 0.2, h = accent_pavilion + eps);
+        }
+}
+
+module main() {
+    rope_strand(0);
+    rope_strand(180);
+    accent_bezel();
+    accent_gem();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Vintage Filigree Diamond Ring",
+        "category": "jewelry",
+        "prompt": "vintage art deco filigree ring with milgrain edges and center diamond",
+        "code": """\
+// DESIGN: vintage filigree ring — ornate band with milgrain beading, open filigree shoulders, center diamond
+// PARTS: band, filigree_shoulders, milgrain_edges, setting, gem, prongs
+// TREE: band → filigree_shoulders + milgrain_edges → setting → gem + prongs
+// CONNECTIONS: shoulder_z, setting_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 3;
+band_thickness = 1.5;
+
+gem_d = 5.5;
+gem_crown = 1.6;
+gem_pavilion = 3.5;
+
+milgrain_bead_d = 0.5;
+milgrain_count = 60;
+
+filigree_arch_count = 5;
+filigree_span_angle = 60;
+shoulder_width = 3.5;
+
+setting_d = 7.5;
+prong_count = 8;
+prong_w = 0.6;
+prong_h = 4.5;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+setting_z = band_outer_r;
+
+// --- Modules ---
+
+module band() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.2) offset(r = -0.2)
+            square([band_thickness, band_width], center = true);
+}
+
+module milgrain_edge(z_offset) {
+    for (i = [0 : milgrain_count - 1])
+        rotate([0, 0, i * 360 / milgrain_count])
+            translate([band_outer_r - 0.1, 0, z_offset])
+                sphere(d = milgrain_bead_d, $fn = 8);
+}
+
+module milgrain_edges() {
+    milgrain_edge(band_width / 2 - milgrain_bead_d / 2);
+    milgrain_edge(-band_width / 2 + milgrain_bead_d / 2);
+}
+
+module filigree_shoulder() {
+    arch_span = filigree_span_angle / filigree_arch_count;
+    for (i = [0 : filigree_arch_count - 1]) {
+        start_a = 90 - filigree_span_angle / 2 + i * arch_span;
+        mid_a = start_a + arch_span / 2;
+        hull() {
+            rotate([0, 0, start_a])
+                translate([band_outer_r, 0, 0])
+                sphere(d = 0.8, $fn = 8);
+            rotate([0, 0, mid_a])
+                translate([band_outer_r + 0.5, 0, 1.5])
+                sphere(d = 0.8, $fn = 8);
+        }
+        hull() {
+            rotate([0, 0, mid_a])
+                translate([band_outer_r + 0.5, 0, 1.5])
+                sphere(d = 0.8, $fn = 8);
+            rotate([0, 0, start_a + arch_span])
+                translate([band_outer_r, 0, 0])
+                sphere(d = 0.8, $fn = 8);
+        }
+    }
+}
+
+module filigree_shoulders() {
+    filigree_shoulder();
+    mirror([1, 0, 0]) filigree_shoulder();
+}
+
+module setting() {
+    translate([0, 0, setting_z])
+        difference() {
+            cylinder(d = setting_d, h = 2);
+            translate([0, 0, -eps])
+                cylinder(d = setting_d - 1.5, h = 2 + 2 * eps);
+        }
+}
+
+module gem() {
+    translate([0, 0, setting_z + 2 - gem_pavilion + 0.5]) {
+        cylinder(r1 = 0, r2 = gem_d / 2, h = gem_pavilion, $fn = 16);
+        translate([0, 0, gem_pavilion - eps])
+            cylinder(r1 = gem_d / 2, r2 = gem_d / 2 * 0.55, h = gem_crown, $fn = 16);
+    }
+}
+
+module prongs() {
+    translate([0, 0, setting_z])
+        for (i = [0 : prong_count - 1])
+            rotate([0, 0, i * 360 / prong_count])
+                translate([setting_d / 2 - prong_w / 2, -prong_w / 2, 0])
+                    cube([prong_w, prong_w, prong_h]);
+}
+
+module main() {
+    band();
+    milgrain_edges();
+    filigree_shoulders();
+    setting();
+    gem();
+    prongs();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Cluster Diamond Cocktail Ring",
+        "category": "jewelry",
+        "prompt": "cluster cocktail ring with multiple diamonds arranged in a flower pattern",
+        "code": """\
+// DESIGN: cluster cocktail ring — wide band topped with a flower-shaped cluster of diamonds
+// PARTS: band, base_plate, center_gem, petal_gems, accent_gems
+// TREE: band → base_plate → center_gem + petal_gems + accent_gems
+// CONNECTIONS: plate_z, gem_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 3;
+band_thickness = 1.8;
+
+center_d = 4;
+petal_d = 3.2;
+petal_count = 6;
+petal_ring_r = 4.2;
+
+accent_d = 1.8;
+accent_count = 12;
+accent_ring_r = 7;
+
+plate_d = 16;
+plate_h = 1.5;
+crown_h = 1.2;
+pavilion_h = 2.5;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+plate_z = band_outer_r - 0.5;
+
+// --- Modules ---
+
+module band() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.3) offset(r = -0.3)
+            square([band_thickness, band_width], center = true);
+}
+
+module base_plate() {
+    translate([0, 0, plate_z])
+        cylinder(d1 = plate_d - 2, d2 = plate_d, h = plate_h);
+}
+
+module mini_gem(d) {
+    cylinder(r1 = 0, r2 = d / 2, h = d * 0.8, $fn = 12);
+    translate([0, 0, d * 0.8 - eps])
+        cylinder(r1 = d / 2, r2 = d / 2 * 0.5, h = d * 0.4, $fn = 12);
+}
+
+module center_gem() {
+    translate([0, 0, plate_z + plate_h])
+        mini_gem(center_d);
+}
+
+module petal_gems() {
+    translate([0, 0, plate_z + plate_h])
+        for (i = [0 : petal_count - 1])
+            rotate([0, 0, i * 360 / petal_count])
+                translate([petal_ring_r, 0, 0])
+                    mini_gem(petal_d);
+}
+
+module accent_gems() {
+    translate([0, 0, plate_z + plate_h - 0.3])
+        for (i = [0 : accent_count - 1])
+            rotate([0, 0, i * 360 / accent_count + 15])
+                translate([accent_ring_r, 0, 0])
+                    mini_gem(accent_d);
+}
+
+module main() {
+    band();
+    base_plate();
+    center_gem();
+    petal_gems();
+    accent_gems();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Bezel Set Diamond Ring",
+        "category": "jewelry",
+        "prompt": "modern bezel set diamond ring with sleek metal collar holding the stone flush",
+        "code": """\
+// DESIGN: bezel ring — clean modern band with a metal collar wrapping the gemstone flush
+// PARTS: band, bezel_collar, gem
+// TREE: band → bezel_collar → gem
+// CONNECTIONS: bezel_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 3;
+band_thickness = 2;
+
+gem_d = 6;
+gem_crown = 1.5;
+gem_pavilion = 3.5;
+
+bezel_wall = 1;
+bezel_h = 3;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+bezel_z = band_outer_r - 1;
+bezel_outer_d = gem_d + bezel_wall * 2;
+
+// --- Modules ---
+
+module band() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.4) offset(r = -0.4)
+            square([band_thickness, band_width], center = true);
+}
+
+module bezel_collar() {
+    translate([0, 0, bezel_z])
+        difference() {
+            cylinder(d = bezel_outer_d, h = bezel_h);
+            translate([0, 0, bezel_h - gem_crown - 0.2])
+                cylinder(d = gem_d + 0.2, h = gem_crown + 0.5);
+            translate([0, 0, -eps])
+                cylinder(d = gem_d - 1, h = bezel_h + 2 * eps);
+        }
+}
+
+module gem() {
+    translate([0, 0, bezel_z + bezel_h - gem_crown - gem_pavilion + 0.5]) {
+        cylinder(r1 = 0, r2 = gem_d / 2, h = gem_pavilion, $fn = 16);
+        translate([0, 0, gem_pavilion - eps])
+            cylinder(r1 = gem_d / 2, r2 = gem_d / 2 * 0.55, h = gem_crown, $fn = 16);
+    }
+}
+
+module main() {
+    band();
+    bezel_collar();
+    gem();
+}
+
+main();
+""",
+    },
+    {
+        "name": "Channel Set Diamond Band",
+        "category": "jewelry",
+        "prompt": "channel set wedding band with row of princess cut diamonds between two rails",
+        "code": """\
+// DESIGN: channel set band — two raised metal rails with square-cut gems recessed between them
+// PARTS: band_base, channel_rails, channel_gems
+// TREE: band_base → channel_rails + channel_gems
+// CONNECTIONS: rail_z, gem_z
+
+$fn = 128;
+eps = 0.01;
+
+// --- Parameters ---
+band_inner_d = 17.3;
+band_width = 4;
+band_thickness = 1.8;
+rail_height = 0.8;
+rail_width = 0.6;
+channel_width = 2.2;
+gem_size = 2;
+gem_count = 16;
+gem_depth = 1.5;
+
+// --- Derived ---
+band_outer_r = band_inner_d / 2 + band_thickness;
+rail_offset = channel_width / 2 + rail_width / 2;
+
+// --- Modules ---
+
+module band_base() {
+    rotate_extrude()
+        translate([band_inner_d / 2 + band_thickness / 2, 0])
+            offset(r = 0.3) offset(r = -0.3)
+            square([band_thickness, band_width], center = true);
+}
+
+module channel_rails() {
+    for (side = [-1, 1])
+        rotate_extrude()
+            translate([band_outer_r - 0.2, side * rail_offset])
+                square([rail_height, rail_width], center = true);
+}
+
+module channel_gems() {
+    for (i = [0 : gem_count - 1])
+        rotate([0, 0, i * 360 / gem_count])
+            translate([band_outer_r - gem_depth / 2, 0, 0])
+                cube([gem_depth, gem_size * 0.9, gem_size * 0.9], center = true);
+}
+
+module main() {
+    band_base();
+    channel_rails();
+    color("white", 0.9) channel_gems();
 }
 
 main();

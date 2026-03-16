@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 
@@ -7,11 +8,13 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.openscad_agent.llm_provider import get_llm
-from app.services.openscad_agent.prompts import AGENT_PROMPT, CODE_PROMPT
+from app.services.openscad_agent.prompts import AGENT_PROMPT
+from app.services.openscad_agent.experiments import resolve_prompts
 from app.services.openscad_agent.example_retriever import get_examples_for_prompt
 from app.services.openscad_agent.tools import (
     apply_parameter_changes,
     build_parametric_model,
+    search_reference_images,
 )
 from app.services.openscad_agent.tools.parameter_patcher import patch_code
 from app.schemas.openscad import OpenSCADResponse, OpenSCADParameter
@@ -19,8 +22,26 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Tools — only the two that matter
-_tools = [apply_parameter_changes, build_parametric_model]
+# ── Jewelry domain detection ─────────────────────────────────────────────────
+
+_JEWELRY_KEYWORDS = frozenset({
+    "ring", "band", "diamond", "gem", "gemstone", "prong", "bezel", "pave",
+    "pavé", "halo", "solitaire", "setting", "carat", "earring", "pendant",
+    "necklace", "bracelet", "brooch", "tiara", "crown ring", "eternity",
+    "cocktail", "engagement", "wedding band", "signet", "jewelry", "jewellery",
+    "filigree", "milgrain", "cathedral", "channel set", "brilliant cut",
+    "princess cut", "emerald cut", "marquise", "cushion cut",
+})
+
+
+def _detect_jewelry(text: str) -> bool:
+    """Check if user request is about jewelry design."""
+    lower = text.lower()
+    return any(kw in lower for kw in _JEWELRY_KEYWORDS)
+
+
+# Tools available to the agent
+_tools = [apply_parameter_changes, build_parametric_model, search_reference_images]
 _tools_by_name = {t.name: t for t in _tools}
 
 
@@ -32,7 +53,7 @@ def _get_components(provider: str | None = None, model: str | None = None, think
     llm = get_llm(provider, model, thinking)
     resolved_provider = (provider or settings.llm_provider).lower()
 
-    tools_supported = resolved_provider not in ("groq",)
+    tools_supported = resolved_provider in ("anthropic",)
     llm_with_tools = llm.bind_tools(_tools) if tools_supported else None
 
     # Separate code-gen LLM with lower temperature and higher token limit
@@ -84,14 +105,31 @@ def _extract_text_content(response) -> str:
     return content or ""
 
 
+def _build_code_prompt(user_input: str, rag_context: str = "") -> tuple[str, dict | None]:
+    """Build the full code generation system prompt, injecting domain context if needed.
+
+    Returns:
+        (prompt_string, experiment_metadata_or_none)
+    """
+    code_prompt, jewelry_context, experiment_meta = resolve_prompts(user_input)
+
+    prompt = code_prompt
+    if _detect_jewelry(user_input) and jewelry_context:
+        prompt += jewelry_context
+        logger.info("[PROMPT] Jewelry domain context injected")
+    if rag_context:
+        prompt += rag_context
+    return prompt, experiment_meta
+
+
 def _build_direct_generation_messages(
     user_input: str,
     history: list[HumanMessage | AIMessage],
     rag_context: str = "",
-) -> list:
+) -> tuple[list, dict | None]:
     """Build messages for direct code generation (no tools, uses CODE_PROMPT)."""
-    prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
-    return [SystemMessage(content=prompt)] + list(history) + [HumanMessage(content=user_input)]
+    prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+    return [SystemMessage(content=prompt)] + list(history) + [HumanMessage(content=user_input)], experiment_meta
 
 
 def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> str:
@@ -123,6 +161,7 @@ async def _generate_code(
     components: dict,
     user_input: str = "",
     rag_context: str = "",
+    _experiment_meta_out: dict | None = None,
 ) -> str:
     """Make a separate LLM call with CODE_PROMPT to generate OpenSCAD code.
 
@@ -135,8 +174,10 @@ async def _generate_code(
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    # Build code generation messages (CADAM pattern) with RAG context
-    prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+    # Build code generation messages (CADAM pattern) with RAG + domain context
+    prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+    if experiment_meta and _experiment_meta_out is not None:
+        _experiment_meta_out.update(experiment_meta)
     code_messages: list = [SystemMessage(content=prompt)]
     code_messages.extend(history)
 
@@ -152,8 +193,10 @@ async def _generate_code(
     code_messages.append(HumanMessage(content=user_text))
 
     llm = components["code_llm"]
+    t_code = time.monotonic()
     result = await llm.ainvoke(code_messages)
     code = _extract_text_content(result)
+    logger.info(f"[CODE_GEN] {time.monotonic() - t_code:.2f}s — {len(code)} chars")
 
     # Strip markdown fences if present
     code = _strip_code_fences(code)
@@ -167,6 +210,7 @@ async def _generate_code_stream(
     components: dict,
     user_input: str = "",
     rag_context: str = "",
+    _experiment_meta_out: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream code generation tokens from a separate LLM call with CODE_PROMPT.
 
@@ -176,7 +220,9 @@ async def _generate_code_stream(
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+    prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+    if experiment_meta and _experiment_meta_out is not None:
+        _experiment_meta_out.update(experiment_meta)
     code_messages: list = [SystemMessage(content=prompt)]
     code_messages.extend(history)
 
@@ -266,7 +312,7 @@ async def _run_tool_loop(
                 return result
 
             else:
-                # Fallback: execute tool normally
+                # Fallback: execute tool normally (e.g. search_reference_images)
                 tool_fn = _tools_by_name.get(tool_name)
                 if tool_fn is None:
                     tool_result = f"Unknown tool: {tool_name}"
@@ -276,8 +322,18 @@ async def _run_tool_loop(
                     except Exception as e:
                         tool_result = f"Tool error: {e}"
 
-                logger.info(f"Tool {tool_name} returned: {tool_result[:200]}")
-                messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_id))
+                logger.info(f"Tool {tool_name} returned: {str(tool_result)[:200]}")
+
+                # Extract embedded image data URLs for multimodal context
+                tool_text = str(tool_result)
+                img_match = re.search(r"\[IMAGE_DATA_URL\](.*?)\[/IMAGE_DATA_URL\]", tool_text, re.DOTALL)
+                if img_match:
+                    clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL).strip()
+                    content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
+                    content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
+                    messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
+                else:
+                    messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
 
     response = await llm.ainvoke(messages)
     return _extract_text_content(response)
@@ -358,6 +414,85 @@ def _score_openscad_code(code: str) -> int:
         score += min(len(var_decls), 5)
 
     return score
+
+
+def _validate_code_quality(code: str) -> dict:
+    """Validate generated OpenSCAD code and return quality metrics."""
+    metrics: dict = {}
+    if not code or len(code) < 20:
+        return metrics
+
+    # 1. Extract PLAN comments
+    plan_parts = re.findall(r'//\s*PARTS:\s*(.+)', code)
+    planned = [p.strip() for p in plan_parts[0].split(',')]  if plan_parts else []
+    metrics["planned_parts"] = len(planned)
+
+    # 2. Defined modules (parameterless, excluding main)
+    defined = re.findall(r'^\s*module\s+([a-zA-Z_]\w*)\s*\(\s*\)', code, re.MULTILINE)
+    defined = [m for m in defined if m not in ('main',)]
+    metrics["defined_modules"] = len(defined)
+
+    # 3. Modules called in main()
+    main_match = re.search(r'module\s+main\s*\(\s*\)\s*\{', code)
+    called_in_main = []
+    if main_match:
+        depth, i = 1, main_match.end()
+        while i < len(code) and depth > 0:
+            if code[i] == '{': depth += 1
+            elif code[i] == '}': depth -= 1
+            i += 1
+        main_body = code[main_match.end():i - 1] if depth == 0 else ""
+        called_in_main = list(set(re.findall(r'\b([a-zA-Z_]\w*)\s*\(', main_body)))
+        called_in_main = [c for c in called_in_main if c in defined]
+    metrics["called_in_main"] = len(called_in_main)
+
+    # 4. Connection point variables
+    conn_vars = re.findall(r'^\s*([a-zA-Z_]\w*(?:_[xyz]|_offset|_pos|_attach|_z|_y|_x))\s*=', code, re.MULTILINE)
+    metrics["connection_vars"] = len(conn_vars)
+
+    # 5. Magic numbers in translate (numbers not from variables)
+    translates = re.findall(r'translate\(\[([^\]]+)\]', code)
+    magic_count = 0
+    for t in translates:
+        nums = re.findall(r'(?<![a-zA-Z_])\d+\.?\d*', t)
+        # Allow 0, eps, and small constants
+        magic_count += sum(1 for n in nums if float(n) > 1)
+    metrics["magic_numbers_in_translate"] = magic_count
+
+    # 6. Uncalled modules (defined but not called in main)
+    uncalled = [m for m in defined if m not in called_in_main]
+    metrics["uncalled_modules"] = len(uncalled)
+
+    # 7. Has eps usage
+    metrics["uses_eps"] = bool(re.search(r'\beps\b', code))
+
+    # 8. Has TREE comment
+    metrics["has_tree"] = bool(re.search(r'//\s*TREE:', code))
+
+    # Log structured metrics
+    issues = []
+    if metrics["planned_parts"] > 0 and metrics["defined_modules"] < metrics["planned_parts"]:
+        issues.append("parts_mismatch")
+    if metrics["defined_modules"] > 0 and metrics["called_in_main"] < metrics["defined_modules"]:
+        issues.append("uncalled_modules")
+    if metrics["connection_vars"] == 0:
+        issues.append("no_connections")
+    if metrics["magic_numbers_in_translate"] > 3:
+        issues.append("magic_numbers")
+    if not metrics["uses_eps"]:
+        issues.append("no_eps")
+
+    metrics["issues"] = issues
+    metrics["status"] = "PASS" if not issues else "WARN"
+
+    logger.info(
+        "[QUALITY] %s | planned=%d modules=%d called=%d conn=%d magic=%d tree=%s issues=%s",
+        metrics["status"], metrics["planned_parts"], metrics["defined_modules"],
+        metrics["called_in_main"], metrics["connection_vars"],
+        metrics["magic_numbers_in_translate"], metrics["has_tree"], issues or "none",
+    )
+
+    return metrics
 
 
 def _looks_like_openscad(text: str) -> bool:
@@ -464,23 +599,32 @@ async def run_agent(
     model: str | None = None,
     thinking: bool = False,
     db: AsyncSession | None = None,
+    _extra_meta: dict | None = None,
 ) -> OpenSCADResponse:
-    """Run agent and return structured OpenSCADResponse."""
+    """Run agent and return structured OpenSCADResponse.
+
+    Args:
+        _extra_meta: Optional mutable dict populated with experiment + quality_metrics data.
+    """
+    t_start = time.monotonic()
     c = _get_components(provider, model, thinking)
+    logger.info(f"[AGENT] Starting request: provider={c['provider']}, model={model}, thinking={thinking}")
 
     # Fetch RAG examples if DB session is available
     rag_context = ""
     if db:
         try:
-            rag_context = await get_examples_for_prompt(db, user_input)
-            if rag_context:
-                logger.info(f"[RAG] Injecting {len(rag_context)} chars of context into prompt")
+            t_rag = time.monotonic()
+            is_jewelry = _detect_jewelry(user_input)
+            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+            logger.info(f"[AGENT][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
         except Exception as e:
-            logger.warning(f"[RAG] Failed to fetch examples: {e}")
+            logger.warning(f"[AGENT][RAG] Failed to fetch examples: {e}")
 
+    experiment_meta = None
     if image_data_urls:
         human_msg = _build_human_message(user_input, image_data_urls)
-        prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+        prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
         messages = [SystemMessage(content=prompt)] + list(history) + [human_msg]
         result = await c["code_llm"].ainvoke(messages)
         agent_output = _extract_text_content(result)
@@ -492,17 +636,29 @@ async def run_agent(
             )
         except Exception as e:
             logger.error(f"Tool loop failed, falling back to direct generation: {e}")
-            msgs = _build_direct_generation_messages(user_input, history, rag_context)
+            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context)
             result = await c["code_llm"].ainvoke(msgs)
             agent_output = _extract_text_content(result)
     else:
-        msgs = _build_direct_generation_messages(user_input, history, rag_context)
+        msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context)
         result = await c["code_llm"].ainvoke(msgs)
         agent_output = _extract_text_content(result)
 
-    logger.info(f"Agent output (first 300 chars): {agent_output[:300]}")
+    t_total = time.monotonic() - t_start
+    logger.info(f"[AGENT] Completed in {t_total:.2f}s — output {len(agent_output)} chars")
 
     data = _extract_from_text(agent_output)
+    quality_metrics = None
+    if data.get("openscad_code"):
+        quality_metrics = _validate_code_quality(data["openscad_code"])
+
+    # Populate extra metadata for caller (experiment + quality)
+    if _extra_meta is not None:
+        if experiment_meta:
+            _extra_meta["experiment"] = experiment_meta
+        if quality_metrics:
+            _extra_meta["quality_metrics"] = quality_metrics
+
     return OpenSCADResponse(
         openscad_code=data["openscad_code"],
         parameters=[OpenSCADParameter(**p) for p in data["parameters"]],
@@ -537,18 +693,20 @@ async def run_agent_stream(
         {"type": "tool", "tool_name": ..., "status": ...} when a tool executes
         {"type": "done", "data": {...}} at the end with extracted structured data
     """
+    t_start = time.monotonic()
     c = _get_components(provider, model, thinking)
-    logger.info(f"[STREAM] provider={c['provider']}, model={model}, thinking={thinking}")
+    logger.info(f"[STREAM] Starting: provider={c['provider']}, model={model}, thinking={thinking}")
 
     # Fetch RAG context
     rag_context = ""
     if db:
         try:
-            rag_context = await get_examples_for_prompt(db, user_input)
-            if rag_context:
-                logger.info(f"[STREAM][RAG] Injecting {len(rag_context)} chars of context")
+            t_rag = time.monotonic()
+            is_jewelry = _detect_jewelry(user_input)
+            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+            logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
         except Exception as e:
-            logger.warning(f"[STREAM][RAG] Failed to fetch examples: {e}")
+            logger.warning(f"[STREAM][RAG] Failed: {e}")
 
     human_msg = _build_human_message(user_input, image_data_urls)
 
@@ -558,12 +716,16 @@ async def run_agent_stream(
         and c["llm_with_tools"] is not None
     )
 
-    # Use AGENT_PROMPT for tool mode, CODE_PROMPT (+ RAG) for direct generation
+    # Use AGENT_PROMPT for tool mode, CODE_PROMPT (+ domain + RAG) for direct generation
+    experiment_meta = None
     if use_tools:
         system_prompt = AGENT_PROMPT
     else:
-        system_prompt = CODE_PROMPT + rag_context if rag_context else CODE_PROMPT
+        system_prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
     messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]
+
+    # Mutable dict for code-gen calls to write experiment metadata into
+    _exp_meta_out: dict = {}
 
     full_text = ""
     agent_text = ""  # Text from outer agent (shown in chat)
@@ -577,7 +739,9 @@ async def run_agent_stream(
         elif image_data_urls:
             stream_source = c["code_llm"].astream(messages)
         else:
-            msgs = _build_direct_generation_messages(user_input, history, rag_context)
+            msgs, _direct_exp_meta = _build_direct_generation_messages(user_input, history, rag_context)
+            if _direct_exp_meta:
+                _exp_meta_out.update(_direct_exp_meta)
             stream_source = c["code_llm"].astream(msgs)
 
         try:
@@ -612,7 +776,7 @@ async def run_agent_stream(
 
                     try:
                         code_tokens = []
-                        async for token in _generate_code_stream(tool_args, history, c, user_input, rag_context):
+                        async for token in _generate_code_stream(tool_args, history, c, user_input, rag_context, _experiment_meta_out=_exp_meta_out):
                             code_tokens.append(token)
                             yield {"type": "token", "text": token}
 
@@ -641,7 +805,7 @@ async def run_agent_stream(
                         full_text = patched
 
                 else:
-                    # Fallback: execute unknown tools normally
+                    # Fallback: execute other tools normally (e.g. search_reference_images)
                     tool_fn = _tools_by_name.get(tool_name)
                     if tool_fn:
                         try:
@@ -652,7 +816,17 @@ async def run_agent_stream(
                         yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
                         messages.append(collected_response)
                         tool_id = tool_call.get("id", tool_name)
-                        messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_id))
+
+                        # Extract embedded image data URLs for multimodal context
+                        tool_text = str(tool_result)
+                        img_match = re.search(r"\[IMAGE_DATA_URL\](.*?)\[/IMAGE_DATA_URL\]", tool_text, re.DOTALL)
+                        if img_match:
+                            clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL).strip()
+                            content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
+                            content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
+                            messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
+                        else:
+                            messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
                         continue
 
             # Don't loop after intercepted tools — we have the result
@@ -669,13 +843,19 @@ async def run_agent_stream(
 
     logger.info(f"[STREAM] Complete, text_length={len(full_text)}, code_length={len(code_text)}")
 
+    # Merge experiment metadata from all sources
+    final_experiment_meta = experiment_meta or _exp_meta_out or None
+
     # Build final response
     if code_text:
         from app.cadquery.tasks import _clean_scad
         code_text = _clean_scad(code_text)
+        quality_metrics = _validate_code_quality(code_text)
         parameters = _extract_parameters_from_code(code_text)
-        # Use agent_text as message if we have it, otherwise generic
-        msg = agent_text.strip() if agent_text.strip() and agent_text.strip() != code_text.strip() else "Model generated."
+        # Strip code blocks from agent text to get clean conversational message
+        msg = re.sub(r'```[\s\S]*?```', '', agent_text).strip()
+        if not msg:
+            msg = "Model generated."
         if len(msg) > 500:
             msg = msg[:500]
         response = {
@@ -686,5 +866,16 @@ async def run_agent_stream(
         }
     else:
         response = _extract_from_text(full_text)
+        quality_metrics = None
+        if response.get("openscad_code"):
+            quality_metrics = _validate_code_quality(response["openscad_code"])
 
+    # Attach experiment + quality data to response for persistence
+    if final_experiment_meta:
+        response["experiment"] = final_experiment_meta
+    if quality_metrics:
+        response["quality_metrics"] = quality_metrics
+
+    t_total = time.monotonic() - t_start
+    logger.info(f"[STREAM] Completed in {t_total:.2f}s — {len(full_text)} chars generated")
     yield {"type": "done", "data": response}

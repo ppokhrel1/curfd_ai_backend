@@ -18,7 +18,7 @@ class MessageCreate(BaseModel):
     openscad_code: str | dict | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
-    llm_thinking: bool = True
+    llm_thinking: bool = False
     images: list[ImageData] | None = None
 
     @field_validator('metadata_json', mode='before')

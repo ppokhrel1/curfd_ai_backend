@@ -233,6 +233,7 @@ async def gemini_openscad_generate_route(
         history = await _build_lc_history(db, payload.chat_id)
 
         # 3. Run LangChain agent with tools + RAG examples
+        extra_meta: dict = {}
         response: OpenSCADResponse = await run_agent(
             user_input=payload.content,
             history=history,
@@ -241,6 +242,7 @@ async def gemini_openscad_generate_route(
             model=payload.llm_model,
             thinking=payload.llm_thinking,
             db=db,
+            _extra_meta=extra_meta,
         )
 
         # 4. Extract fields (already validated by schema)
@@ -250,16 +252,22 @@ async def gemini_openscad_generate_route(
         message: str = response.message or ("Model generated." if code else "Here to help!")
 
         # 5. Persist assistant message — store code in metadata, friendly text as content
+        msg_meta: dict = {
+            "openscad_code": code,
+            "parameters": parameters,
+            "model_type": model_type,
+            "message": message,
+        }
+        if extra_meta.get("experiment"):
+            msg_meta["experiment"] = extra_meta["experiment"]
+        if extra_meta.get("quality_metrics"):
+            msg_meta["quality_metrics"] = extra_meta["quality_metrics"]
+
         ai_msg = MessageModel(
             chat_id=payload.chat_id,
             role="assistant",
             content=message,
-            metadata_json={
-                "openscad_code": code,
-                "parameters": parameters,
-                "model_type": model_type,
-                "message": message,
-            },
+            metadata_json=msg_meta,
         )
         db.add(ai_msg)
         await db.commit()
@@ -352,16 +360,22 @@ async def stream_openscad_generate(
                 message = final_data.get("message", "Model generated." if code else "Here to help!")
 
                 # Persist assistant message
+                msg_meta = {
+                    "openscad_code": code,
+                    "parameters": parameters,
+                    "model_type": model_type,
+                    "message": message,
+                }
+                if final_data.get("experiment"):
+                    msg_meta["experiment"] = final_data["experiment"]
+                if final_data.get("quality_metrics"):
+                    msg_meta["quality_metrics"] = final_data["quality_metrics"]
+
                 ai_msg = MessageModel(
                     chat_id=payload.chat_id,
                     role="assistant",
                     content=message,
-                    metadata_json={
-                        "openscad_code": code,
-                        "parameters": parameters,
-                        "model_type": model_type,
-                        "message": message,
-                    },
+                    metadata_json=msg_meta,
                 )
                 db.add(ai_msg)
                 await db.commit()

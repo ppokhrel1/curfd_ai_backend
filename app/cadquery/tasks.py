@@ -78,18 +78,58 @@ def _clean_scad(code: str) -> str:
 
 
 def _extract_module_names(scad_code: str) -> list:
-    """Return user-defined module names from OpenSCAD code, excluding structural wrappers
-    and parameterized helper modules (which can't be compiled standalone)."""
+    """Return module names called directly inside main(), excluding helper modules
+    that are only called from other modules (not from main).
+
+    This ensures each extracted part renders correctly at its intended position,
+    since main() provides the assembly transforms."""
+    # Step 1: Find all defined module names (parameterless, non-excluded)
+    all_modules = set()
     pattern = r'^\s*module\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)'
-    results = []
     for name, params in re.findall(pattern, scad_code, re.MULTILINE):
         if name.lower() in _EXCLUDED_MODULES or name.startswith('_'):
             continue
-        # Skip modules that take parameters — they're helpers, not standalone parts
         if params.strip():
             continue
-        results.append(name)
-    return results
+        all_modules.add(name)
+
+    if not all_modules:
+        return []
+
+    # Step 2: Extract the main() module body
+    main_match = re.search(
+        r'module\s+main\s*\(\s*\)\s*\{', scad_code
+    )
+    if not main_match:
+        # No main() found — fall back to returning all modules
+        return list(all_modules)
+
+    # Find matching closing brace for main()
+    start = main_match.end()
+    depth = 1
+    i = start
+    while i < len(scad_code) and depth > 0:
+        if scad_code[i] == '{':
+            depth += 1
+        elif scad_code[i] == '}':
+            depth -= 1
+        i += 1
+    main_body = scad_code[start:i - 1] if depth == 0 else scad_code[start:]
+
+    # Step 3: Find module calls inside main() body
+    call_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\('
+    called_in_main = set(re.findall(call_pattern, main_body))
+
+    # Step 4: Only keep modules that are both defined AND called in main()
+    results = [name for name in all_modules if name in called_in_main]
+
+    # Preserve original definition order
+    def_order = []
+    for name, _ in re.findall(pattern, scad_code, re.MULTILINE):
+        if name in results and name not in def_order:
+            def_order.append(name)
+
+    return def_order
 
 
 def _content_hash(content: str) -> str:
@@ -216,7 +256,8 @@ def _strip_toplevel_calls(scad_code: str) -> str:
     )
     lines = scad_code.split('\n')
     out: list[str] = []
-    depth = 0
+    brace_depth = 0
+    bracket_depth = 0
     in_toplevel_exec = False
 
     for line in lines:
@@ -225,20 +266,27 @@ def _strip_toplevel_calls(scad_code: str) -> str:
         if in_toplevel_exec:
             for ch in line:
                 if ch == '{':
-                    depth += 1
+                    brace_depth += 1
                 elif ch == '}':
-                    depth -= 1
+                    brace_depth -= 1
             out.append('')
-            if depth <= 0:
+            if brace_depth <= 0:
                 in_toplevel_exec = False
-                depth = 0
+                brace_depth = 0
+            continue
+
+        # Track bracket depth for multi-line array assignments (e.g. prong_positions = [...])
+        if bracket_depth > 0:
+            out.append(line)
+            bracket_depth += line.count('[') - line.count(']')
+            bracket_depth = max(0, bracket_depth)
             continue
 
         opens = line.count('{')
         closes = line.count('}')
-        new_depth = depth + opens - closes
+        new_depth = brace_depth + opens - closes
 
-        if depth == 0:
+        if brace_depth == 0:
             if (not stripped
                     or stripped.startswith('//')
                     or stripped.startswith('/*')
@@ -247,17 +295,20 @@ def _strip_toplevel_calls(scad_code: str) -> str:
                     or stripped.startswith('include ')
                     or _decl_re.match(line)):
                 out.append(line)
-                depth = max(0, new_depth)
+                brace_depth = max(0, new_depth)
+                # Check if this line opens a multi-line array
+                bracket_depth = line.count('[') - line.count(']')
+                bracket_depth = max(0, bracket_depth)
             else:
                 # Top-level executable code — strip it
                 out.append('')
                 if new_depth > 0:
                     in_toplevel_exec = True
-                    depth = new_depth
+                    brace_depth = new_depth
         else:
             # Inside a declaration body — keep everything
             out.append(line)
-            depth = max(0, new_depth)
+            brace_depth = max(0, new_depth)
 
     return '\n'.join(out)
 

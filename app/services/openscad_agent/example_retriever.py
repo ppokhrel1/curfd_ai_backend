@@ -21,11 +21,13 @@ from app.models.openscad_example import OpenscadExample
 
 logger = logging.getLogger(__name__)
 
-MAX_EXAMPLES = 2
-MAX_CODE_LENGTH = 4000
+MAX_EXAMPLES = 1
+MAX_EXAMPLES_JEWELRY = 2
+MAX_CODE_LENGTH = 2500
 STORAGE_BUCKET = "openscad-examples"
 EMBEDDING_MODEL = "gemini-embedding-001"
-SIMILARITY_THRESHOLD = 0.6  # Minimum cosine similarity to consider a match
+SIMILARITY_THRESHOLD = 0.72  # Minimum cosine similarity to consider a match
+SIMILARITY_THRESHOLD_JEWELRY = 0.5  # Lower threshold for jewelry (more examples match)
 
 # ── Embedding generation ────────────────────────────────────────────────────
 
@@ -82,13 +84,18 @@ def _fetch_from_storage(storage_path: str) -> str | None:
 # ── Vector search ────────────────────────────────────────────────────────────
 
 
-async def _vector_search(db: AsyncSession, user_input: str) -> list[dict]:
-    """Search openscad_examples using pgvector cosine similarity."""
+async def _vector_search(db: AsyncSession, user_input: str, is_jewelry: bool = False) -> list[dict]:
+    """Search openscad_examples using pgvector cosine similarity.
+
+    For jewelry queries: lower threshold (0.5), more results (3), prefer jewelry category.
+    """
     embedding = _generate_embedding(user_input)
     if embedding is None:
         return []
 
     embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+    limit = MAX_EXAMPLES_JEWELRY if is_jewelry else MAX_EXAMPLES
+    threshold = SIMILARITY_THRESHOLD_JEWELRY if is_jewelry else SIMILARITY_THRESHOLD
 
     # pgvector cosine distance: 1 - cosine_similarity
     # Lower distance = more similar. Use cast() for asyncpg compatibility.
@@ -101,14 +108,27 @@ async def _vector_search(db: AsyncSession, user_input: str) -> list[dict]:
             ORDER BY embedding <=> cast(:embedding as vector)
             LIMIT :limit
         """),
-        {"embedding": embedding_str, "limit": MAX_EXAMPLES},
+        {"embedding": embedding_str, "limit": limit + 2},
     )
 
     rows = result.mappings().all()
+
+    # Log all candidates with their scores for debugging
+    for row in rows:
+        logger.info(f"[RAG] Candidate: {row['name']} (sim={row['similarity']:.3f}, threshold={threshold})")
+
     matches = [
         dict(row) for row in rows
-        if row["similarity"] >= SIMILARITY_THRESHOLD
+        if row["similarity"] >= threshold
     ]
+
+    # For jewelry queries, boost jewelry-category results to the top
+    if is_jewelry and matches:
+        jewelry = [m for m in matches if m.get("category") == "jewelry"]
+        others = [m for m in matches if m.get("category") != "jewelry"]
+        matches = (jewelry + others)[:limit]
+    else:
+        matches = matches[:limit]
 
     return matches
 
@@ -156,12 +176,11 @@ def _format_examples(examples: list[tuple[dict, str]]) -> str:
     if not examples:
         return ""
 
-    parts = ["\n# REFERENCE EXAMPLES (from similar designs — adapt the structure, not copy)\n"]
+    parts = []
     for i, (meta, code) in enumerate(examples, 1):
         if len(code) > MAX_CODE_LENGTH:
             code = code[:MAX_CODE_LENGTH] + "\n// ... (truncated)"
-        sim = meta.get("similarity", 0)
-        parts.append(f"## Reference {i}: {meta['name']} (similarity: {sim:.2f})\n{code}\n")
+        parts.append(f"\n// Reference: {meta['name']}\n{code}")
 
     return "\n".join(parts)
 
@@ -170,67 +189,14 @@ def _format_web_results(web_text: str) -> str:
     """Format web search results as context for prompt injection."""
     if not web_text:
         return ""
-    return (
-        "\n# REFERENCE CONTEXT (from web search — use for shape/dimension inspiration only)\n"
-        f"{web_text}\n"
-    )
+    return f"\n// Web reference (dimensions only):\n{web_text[:1500]}\n"
 
 
 # ── Generic fallback (when RAG + web search both empty) ─────────────────────
 
-GENERIC_EXAMPLE = """
-# REFERENCE EXAMPLE (generic template — adapt structure to user's request)
-
-$fn = 64;
-eps = 0.01;
-
-// --- Parameters (mm) ---
-body_width = 60;
-body_depth = 40;
-body_height = 30;
-wall = 2;
-corner_r = 3;
-hole_d = 5;
-hole_spacing = 20;
-
-// --- Modules ---
-module rounded_box(w, d, h, r) {
-    minkowski() {
-        cube([w - 2*r, d - 2*r, h]);
-        cylinder(r=r, h=eps);
-    }
-}
-
-module mounting_holes() {
-    for (dx = [-1, 1])
-        translate([body_width/2 + dx*hole_spacing/2, body_depth/2, -eps])
-            cylinder(d=hole_d + 0.4, h=wall + 2*eps);
-}
-
-module main() {
-    difference() {
-        // Outer shell
-        rounded_box(body_width, body_depth, body_height, corner_r);
-
-        // Hollow interior
-        translate([wall, wall, wall])
-            rounded_box(body_width - 2*wall, body_depth - 2*wall, body_height, corner_r);
-
-        // Mounting holes
-        mounting_holes();
-    }
-}
-
-main();
-"""
-
-
 def _generic_fallback_example() -> str:
-    """Return a generic well-structured OpenSCAD example as last-resort context."""
-    return (
-        "\n# REFERENCE EXAMPLE (generic — adapt the parametric structure to the user's request)\n"
-        + GENERIC_EXAMPLE
-    )
+    """Return empty string — the CODE_PROMPT already has a full example."""
+    return ""
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -239,16 +205,17 @@ def _generic_fallback_example() -> str:
 async def get_examples_for_prompt(
     db: AsyncSession,
     user_input: str,
+    is_jewelry: bool = False,
 ) -> str:
     """Retrieve relevant OpenSCAD examples and return formatted text for prompt injection.
 
-    1. Vector similarity search in DB
+    1. Vector similarity search in DB (enhanced for jewelry queries)
     2. Fetch code from Supabase Storage for each match
     3. If no DB matches, fall back to web search for the object shape
     4. Return formatted string to append to CODE_PROMPT
     """
     # Try vector search first
-    matches = await _vector_search(db, user_input)
+    matches = await _vector_search(db, user_input, is_jewelry=is_jewelry)
 
     if matches:
         logger.info(f"[RAG] Vector search found {len(matches)} examples: {[m['name'] for m in matches]}")
