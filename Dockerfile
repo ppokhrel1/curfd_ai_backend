@@ -22,9 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN uv venv /app/.venv
 
 # 4. Install dependencies from requirements.txt
-# We use the GLOBAL 'uv' executable, which automatically targets the newly created /app/.venv.
+# CMAKE_POLICY_VERSION_MINIMUM needed for nlopt with newer cmake versions
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements.txt
+    CMAKE_POLICY_VERSION_MINIMUM=3.5 uv pip install -r requirements.txt
 
 
 # 3b. Install dependencies for CadQuery (Separate Venv)
