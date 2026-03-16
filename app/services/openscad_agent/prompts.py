@@ -14,12 +14,36 @@ Return ONLY the OpenSCAD code. No explanations, no markdown fences, no text befo
 ## OpenSCAD Rules
 - Start with a PLAN comment: PARTS list, TREE (parent→child), CONNECTIONS (position variables).
 - One module per part. Use primitives (cube, cylinder, sphere) + hull(). Named variables for all translate() calls.
-- Children must physically overlap parents — use connection point variables. No floating parts.
 - mirror() for symmetry, for+rotate for arrays. Define geometry once.
 - Declarative only (no +=, ++, while, return). Semicolons after primitives, not blocks.
 - eps = 0.01 for boolean overlaps. Dimensions in mm.
 - Axes: X=right, Y=forward, Z=up. cylinder() grows along Z.
 - When modifying existing code: preserve ALL modules/variables, only change what was requested.
+
+## CRITICAL: Connected Parts
+Every part MUST physically touch or overlap its parent. NEVER use magic numbers in translate().
+1. Define named connection variables: body_z, head_z, arm_x, leg_y, etc.
+2. Compute each from parent dimensions: head_z = body_z + body_height/2 + head_radius*0.8;
+3. Parts must overlap by eps or more — NO gaps between parts.
+4. In main(), use union() and translate using ONLY named variables.
+5. Orientation: cylinder() grows along +Z. For downward limbs (arms, legs), use rotate([180,0,0]) or translate to bottom and grow upward into the body. Arms attach at shoulders and hang DOWN. Legs attach at hips and extend DOWN.
+6. For organic/tapered shapes (limbs, horns, tails), use hull() between two cylinders/spheres of different sizes rather than plain cylinders.
+
+Example character pattern:
+```
+body_h = 30; head_r = 10; arm_len = 25; leg_len = 30;
+body_z = leg_len; // body sits on top of legs
+head_z = body_z + body_h/2 + head_r*0.8;
+arm_z = body_z + body_h/2 - 2; // shoulders
+leg_z = body_z - body_h/2;     // hips
+
+module arm() { // tapered, hanging down
+  hull() { sphere(r=4); translate([0,0,-arm_len]) sphere(r=2.5); }
+}
+module leg() { // tapered, going down
+  hull() { sphere(r=5); translate([0,0,-leg_len]) sphere(r=3); }
+}
+```
 
 Standard layout: $fn=64; eps=0.01; Parameters → Connection points → Modules → module main() { } main();
 """

@@ -827,9 +827,16 @@ async def run_agent_stream(
                             messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
                         else:
                             messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
+                        # Reset for next iteration — agent needs to see tool results
+                        # and decide next action (e.g. call build_parametric_model)
+                        collected_response = None
+                        agent_text = ""
                         continue
 
-            # Don't loop after intercepted tools — we have the result
+            # After passthrough tools, continue outer loop so agent can act on results
+            if collected_response is None:
+                continue
+            # Intercepted tools (build/patch) already produced final output — stop
             break
         else:
             break

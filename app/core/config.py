@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     replicate_api_token: str | None = None
 
     # LLM provider configuration
-    llm_provider: str = "anthropic"  # "gemini" | "anthropic"
+    llm_provider: str = "groq"  # "gemini" | "anthropic" | "groq"
     llm_model: str | None = None  # Override model name, or use provider default
     llm_temperature: float = 0.3
     anthropic_api_key: str | None = None

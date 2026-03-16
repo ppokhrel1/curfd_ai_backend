@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 def _fetch_ddg_images(query: str, max_results: int = 3) -> list[dict]:
     """Search DuckDuckGo Images and return image metadata."""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.images(query, max_results=max_results))
         return results
