@@ -27,11 +27,12 @@ def apply_parameter_changes(
 
 
 def patch_code(existing_code: str, updates: list[dict]) -> tuple[str, list[str], list[str]]:
-    """Apply parameter patches to OpenSCAD code via regex.
+    """Apply parameter patches to OpenSCAD or CadQuery Python code via regex.
 
     Returns:
         (patched_code, applied_list, not_found_list)
     """
+    is_python = "import cadquery" in existing_code or "cq.Workplane" in existing_code
     patched_code = existing_code
     applied = []
     not_found = []
@@ -42,47 +43,64 @@ def patch_code(existing_code: str, updates: list[dict]) -> tuple[str, list[str],
         if not name:
             continue
 
-        # Detect the target type from existing assignment
-        # Numeric pattern
-        num_pattern = re.compile(
-            rf"^(\s*{re.escape(name)}\s*=\s*)([-+]?[0-9]*\.?[0-9]+)(\s*;.*)$",
-            re.MULTILINE,
-        )
-        # String pattern
-        str_pattern = re.compile(
-            rf'^(\s*{re.escape(name)}\s*=\s*)"([^"]*)"(\s*;.*)$',
-            re.MULTILINE,
-        )
-        # Boolean pattern
-        bool_pattern = re.compile(
-            rf"^(\s*{re.escape(name)}\s*=\s*)(true|false)(\s*;.*)$",
-            re.MULTILINE,
-        )
-
-        matched = False
-        for pattern, is_string in [(num_pattern, False), (str_pattern, True), (bool_pattern, False)]:
-            match = pattern.search(patched_code)
+        if is_python:
+            # Python-style: name = value  # optional comment
+            py_num_pattern = re.compile(
+                rf"^(\s*{re.escape(name)}\s*=\s*)([-+]?[0-9]*\.?[0-9]+)(\s*(?:#.*)?)$",
+                re.MULTILINE,
+            )
+            match = py_num_pattern.search(patched_code)
             if match:
                 old_val = match.group(2)
-                # Coerce value
-                if is_string:
-                    coerced = str(value).replace('"', '\\"')
-                    replacement = f'{match.group(1)}"{coerced}"{match.group(3)}'
-                else:
-                    try:
-                        coerced = float(value)
-                        if coerced == int(coerced):
-                            coerced = int(coerced)
-                    except (ValueError, TypeError):
-                        coerced = value
-                    replacement = f"{match.group(1)}{coerced}{match.group(3)}"
-
-                patched_code = pattern.sub(replacement, patched_code, count=1)
+                try:
+                    coerced = float(value)
+                    if coerced == int(coerced):
+                        coerced = int(coerced)
+                except (ValueError, TypeError):
+                    coerced = value
+                replacement = f"{match.group(1)}{coerced}{match.group(3)}"
+                patched_code = py_num_pattern.sub(replacement, patched_code, count=1)
                 applied.append(f"{name}: {old_val} -> {coerced}")
-                matched = True
-                break
+            else:
+                not_found.append(name)
+        else:
+            # OpenSCAD-style: name = value;
+            num_pattern = re.compile(
+                rf"^(\s*{re.escape(name)}\s*=\s*)([-+]?[0-9]*\.?[0-9]+)(\s*;.*)$",
+                re.MULTILINE,
+            )
+            str_pattern = re.compile(
+                rf'^(\s*{re.escape(name)}\s*=\s*)"([^"]*)"(\s*;.*)$',
+                re.MULTILINE,
+            )
+            bool_pattern = re.compile(
+                rf"^(\s*{re.escape(name)}\s*=\s*)(true|false)(\s*;.*)$",
+                re.MULTILINE,
+            )
 
-        if not matched:
-            not_found.append(name)
+            matched = False
+            for pattern, is_string in [(num_pattern, False), (str_pattern, True), (bool_pattern, False)]:
+                match = pattern.search(patched_code)
+                if match:
+                    old_val = match.group(2)
+                    if is_string:
+                        coerced = str(value).replace('"', '\\"')
+                        replacement = f'{match.group(1)}"{coerced}"{match.group(3)}'
+                    else:
+                        try:
+                            coerced = float(value)
+                            if coerced == int(coerced):
+                                coerced = int(coerced)
+                        except (ValueError, TypeError):
+                            coerced = value
+                        replacement = f"{match.group(1)}{coerced}{match.group(3)}"
+
+                    patched_code = pattern.sub(replacement, patched_code, count=1)
+                    applied.append(f"{name}: {old_val} -> {coerced}")
+                    matched = True
+                    break
+
+            if not matched:
+                not_found.append(name)
 
     return patched_code, applied, not_found

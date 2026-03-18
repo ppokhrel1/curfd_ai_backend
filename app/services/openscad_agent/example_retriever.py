@@ -165,13 +165,16 @@ def _extract_keywords(user_input: str) -> list[str]:
     return [w for w in words if w not in stopwords and len(w) > 2]
 
 
-async def _web_search_examples(user_input: str) -> str:
+async def _web_search_examples(user_input: str, code_language: str = "openscad") -> str:
     """Fall back to web search for the shape of the object."""
     try:
         from ddgs import DDGS
 
         keywords = _extract_keywords(user_input)
-        query = f"OpenSCAD code {' '.join(keywords[:4])} shape dimensions mm"
+        if code_language == "cadquery":
+            query = f"CadQuery Python {' '.join(keywords[:4])} 3D model code"
+        else:
+            query = f"OpenSCAD code {' '.join(keywords[:4])} shape dimensions mm"
         logger.info(f"[RAG] Web search fallback: {query}")
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=3))
@@ -223,13 +226,14 @@ async def get_examples_for_prompt(
     db: AsyncSession,
     user_input: str,
     is_jewelry: bool = False,
+    code_language: str = "openscad",
 ) -> str:
-    """Retrieve relevant OpenSCAD examples and return formatted text for prompt injection.
+    """Retrieve relevant examples and return formatted text for prompt injection.
 
     1. Vector similarity search in DB (enhanced for jewelry queries)
     2. Fetch code from Supabase Storage for each match
     3. If no DB matches, fall back to web search for the object shape
-    4. Return formatted string to append to CODE_PROMPT
+    4. Return formatted string to append to CODE_PROMPT or CADQUERY_CODE_PROMPT
     """
     # Try vector search first
     matches = await _vector_search(db, user_input, is_jewelry=is_jewelry)
@@ -252,7 +256,7 @@ async def get_examples_for_prompt(
     # Fallback: web search — only for mechanical/CAD queries (not anime characters etc.)
     if _is_mechanical_query(user_input):
         logger.info("[RAG] No DB matches, trying web search for shape")
-        web_text = await _web_search_examples(user_input)
+        web_text = await _web_search_examples(user_input, code_language)
         if web_text:
             return _format_web_results(web_text)
     else:

@@ -808,6 +808,7 @@ async def _handle_openscad_ws(
                 model=options.get("llm_model"),
                 thinking=options.get("llm_thinking", False),
                 db=db,
+                code_language=options.get("code_language", "openscad"),
             ):
                 if event["type"] == "token":
                     await websocket.send_json({

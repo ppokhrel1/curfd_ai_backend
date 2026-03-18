@@ -106,12 +106,22 @@ def _extract_text_content(response) -> str:
     return content or ""
 
 
-def _build_code_prompt(user_input: str, rag_context: str = "") -> tuple[str, dict | None]:
+def _build_code_prompt(
+    user_input: str, rag_context: str = "", code_language: str = "openscad",
+) -> tuple[str, dict | None]:
     """Build the full code generation system prompt, injecting domain context if needed.
 
     Returns:
         (prompt_string, experiment_metadata_or_none)
     """
+    if code_language == "cadquery":
+        from app.services.openscad_agent.prompts import CADQUERY_CODE_PROMPT
+        logger.info("[PROMPT] CadQuery code generation")
+        prompt = CADQUERY_CODE_PROMPT
+        if rag_context:
+            prompt += rag_context
+        return prompt, None
+
     code_prompt, jewelry_context, experiment_meta = resolve_prompts(user_input)
 
     prompt = code_prompt
@@ -127,17 +137,18 @@ def _build_direct_generation_messages(
     user_input: str,
     history: list[HumanMessage | AIMessage],
     rag_context: str = "",
+    code_language: str = "openscad",
 ) -> tuple[list, dict | None]:
     """Build messages for direct code generation (no tools, uses CODE_PROMPT)."""
-    prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+    prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
     return [SystemMessage(content=prompt)] + list(history) + [HumanMessage(content=user_input)], experiment_meta
 
 
 def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> str:
-    """Extract the most recent OpenSCAD code from conversation history.
+    """Extract the most recent code (OpenSCAD or CadQuery) from conversation history.
 
     After the CADAM-style history format change, assistant messages contain
-    raw code directly, so we check for OpenSCAD-like content first.
+    raw code directly, so we check for code-like content first.
     """
     for msg in reversed(history):
         if isinstance(msg, AIMessage):
@@ -145,7 +156,7 @@ def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> s
             if not text:
                 continue
             # History now contains raw code (CADAM pattern)
-            if _looks_like_openscad(text):
+            if _looks_like_openscad(text) or _looks_like_cadquery(text):
                 return text.strip()
             # Fallback: try extracting from code blocks (legacy format)
             code_match = _CODE_BLOCK_RE.search(text)
@@ -163,11 +174,12 @@ async def _generate_code(
     user_input: str = "",
     rag_context: str = "",
     _experiment_meta_out: dict | None = None,
+    code_language: str = "openscad",
 ) -> str:
-    """Make a separate LLM call with CODE_PROMPT to generate OpenSCAD code.
+    """Make a separate LLM call with CODE_PROMPT to generate code.
 
     Matches CADAM's handleToolCall pattern:
-    - System: STRICT_CODE_PROMPT (+ RAG examples if available)
+    - System: CODE_PROMPT or CADQUERY_CODE_PROMPT (+ RAG examples if available)
     - ...full conversation history (history already excludes current user msg)
     - (optional) Assistant: baseCode
     - User: original user request (+ error context if present)
@@ -176,7 +188,7 @@ async def _generate_code(
     error = tool_args.get("error", "")
 
     # Build code generation messages (CADAM pattern) with RAG + domain context
-    prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+    prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
     if experiment_meta and _experiment_meta_out is not None:
         _experiment_meta_out.update(experiment_meta)
     code_messages: list = [SystemMessage(content=prompt)]
@@ -189,7 +201,8 @@ async def _generate_code(
     # Always use the ORIGINAL user message, not the tool's paraphrased text
     user_text = user_input
     if error:
-        user_text = f"{user_input}\n\nFix this OpenSCAD error: {error}"
+        error_label = "CadQuery Python" if code_language == "cadquery" else "OpenSCAD"
+        user_text = f"{user_input}\n\nFix this {error_label} error: {error}"
 
     code_messages.append(HumanMessage(content=user_text))
 
@@ -212,6 +225,7 @@ async def _generate_code_stream(
     user_input: str = "",
     rag_context: str = "",
     _experiment_meta_out: dict | None = None,
+    code_language: str = "openscad",
 ) -> AsyncGenerator[str, None]:
     """Stream code generation tokens from a separate LLM call with CODE_PROMPT.
 
@@ -221,7 +235,7 @@ async def _generate_code_stream(
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+    prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
     if experiment_meta and _experiment_meta_out is not None:
         _experiment_meta_out.update(experiment_meta)
     code_messages: list = [SystemMessage(content=prompt)]
@@ -233,7 +247,8 @@ async def _generate_code_stream(
     # Always use original user message
     user_text = user_input
     if error:
-        user_text = f"{user_input}\n\nFix this OpenSCAD error: {error}"
+        error_label = "CadQuery Python" if code_language == "cadquery" else "OpenSCAD"
+        user_text = f"{user_input}\n\nFix this {error_label} error: {error}"
 
     code_messages.append(HumanMessage(content=user_text))
 
@@ -276,6 +291,7 @@ async def _run_tool_loop(
     components: dict,
     image_data_urls: list[str] | None = None,
     rag_context: str = "",
+    code_language: str = "openscad",
 ) -> str:
     """
     Manual tool-calling loop matching CADAM's pattern:
@@ -303,7 +319,7 @@ async def _run_tool_loop(
 
             if tool_name == "build_parametric_model":
                 # CADAM pattern: separate LLM call with CODE_PROMPT + RAG context
-                code = await _generate_code(tool_args, history, components, user_input, rag_context)
+                code = await _generate_code(tool_args, history, components, user_input, rag_context, code_language=code_language)
                 logger.info(f"Code generation returned {len(code)} chars")
                 return code
 
@@ -342,7 +358,7 @@ async def _run_tool_loop(
 
 # ── Extraction (regex-based, no extra LLM call) ──────────────────────────────
 
-_CODE_BLOCK_RE = re.compile(r"```(?:openscad)?\s*\n(.*?)```", re.DOTALL)
+_CODE_BLOCK_RE = re.compile(r"```(?:openscad|python)?\s*\n(.*?)```", re.DOTALL)
 _PARAM_RE = re.compile(
     r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([-+]?[0-9]*\.?[0-9]+)\s*;",
     re.MULTILINE,
@@ -354,7 +370,7 @@ def _strip_code_fences(code: str) -> str:
     """Strip markdown code fences from generated code."""
     code = code.strip()
     # Try full-match first (entire response is a code block)
-    match = re.match(r'^```(?:openscad)?\n?([\s\S]*?)\n?```$', code)
+    match = re.match(r'^```(?:openscad|python)?\n?([\s\S]*?)\n?```$', code)
     if match:
         return match.group(1).strip()
     # Try extracting the best code block
@@ -511,6 +527,45 @@ def _looks_like_openscad(text: str) -> bool:
     return _score_openscad_code(text) >= 3
 
 
+def _looks_like_cadquery(text: str) -> bool:
+    """Quick heuristic to detect CadQuery Python code."""
+    return "import cadquery" in text or "cq.Workplane" in text
+
+
+_PYTHON_PARAM_RE = re.compile(
+    r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([-+]?[0-9]*\.?[0-9]+)\s*(?:#.*)?$",
+    re.MULTILINE,
+)
+_IGNORED_PYTHON_VARS = frozenset({"result", "cq", "pi", "tau", "e"})
+
+
+def _extract_parameters_from_cadquery(code: str) -> list[dict]:
+    """Extract tunable parameters from CadQuery Python top-level variable assignments."""
+    params = []
+    for m in _PYTHON_PARAM_RE.finditer(code):
+        name = m.group(1)
+        val = float(m.group(2))
+        if name in _IGNORED_PYTHON_VARS or name.startswith("_"):
+            continue
+        # Stop once we hit construction code (past the parameters section)
+        preceding = code[:m.start()]
+        if "cq.Workplane" in preceding or "\ndef " in preceding:
+            break
+        min_val = val * 0.5 if val > 0 else val - 10
+        max_val = val * 1.5 if val > 0 else val + 10
+        if min_val == max_val:
+            min_val -= 5
+            max_val += 5
+        params.append({
+            "name": name,
+            "default_val": val,
+            "min_val": round(min_val, 2),
+            "max_val": round(max_val, 2),
+            "description": f"Parameter: {name}",
+        })
+    return params
+
+
 def _extract_openscad_from_text(text: str) -> str | None:
     """Extract OpenSCAD code from text response (CADAM's extractOpenSCADCodeFromText).
 
@@ -558,14 +613,18 @@ def _extract_from_text(text: str) -> dict:
         if patched_match:
             code = patched_match.group(1).strip()
 
-    # Fallback: try CADAM-style extraction (score-based)
+    # Fallback: try CADAM-style extraction (score-based) or CadQuery detection
     if not code:
-        extracted = _extract_openscad_from_text(text)
-        if extracted:
-            code = extracted
+        if _looks_like_cadquery(text):
+            code = _strip_code_fences(text)
+        else:
+            extracted = _extract_openscad_from_text(text)
+            if extracted:
+                code = extracted
 
     if code:
-        code = _clean_scad(code)
+        if not _looks_like_cadquery(code):
+            code = _clean_scad(code)
 
     if code_match:
         message = text[: code_match.start()].strip()
@@ -589,7 +648,12 @@ def _extract_from_text(text: str) -> dict:
     if len(message) > 500:
         message = message[:500]
 
-    parameters = _extract_parameters_from_code(code) if code else []
+    if code and _looks_like_cadquery(code):
+        parameters = _extract_parameters_from_cadquery(code)
+    elif code:
+        parameters = _extract_parameters_from_code(code)
+    else:
+        parameters = []
     model_type = "chat" if not code else "mechanical"
 
     return {
@@ -611,6 +675,7 @@ async def run_agent(
     thinking: bool = False,
     db: AsyncSession | None = None,
     _extra_meta: dict | None = None,
+    code_language: str = "openscad",
 ) -> OpenSCADResponse:
     """Run agent and return structured OpenSCADResponse.
 
@@ -629,7 +694,7 @@ async def run_agent(
             try:
                 t_rag = time.monotonic()
                 is_jewelry = _detect_jewelry(user_input)
-                ctx = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+                ctx = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry, code_language=code_language)
                 logger.info(f"[AGENT][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
                 return ctx
             except Exception as e:
@@ -644,7 +709,7 @@ async def run_agent(
     experiment_meta = None
     if image_data_urls:
         human_msg = _build_human_message(user_input, image_data_urls)
-        prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+        prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
         messages = [SystemMessage(content=prompt)] + list(history) + [human_msg]
         result = await c["code_llm"].ainvoke(messages)
         agent_output = _extract_text_content(result)
@@ -652,15 +717,15 @@ async def run_agent(
         try:
             agent_output = await _run_tool_loop(
                 user_input, history, settings.agent_max_iterations,
-                c, rag_context=rag_context,
+                c, rag_context=rag_context, code_language=code_language,
             )
         except Exception as e:
             logger.error(f"Tool loop failed, falling back to direct generation: {e}")
-            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context)
+            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
             result = await c["code_llm"].ainvoke(msgs)
             agent_output = _extract_text_content(result)
     else:
-        msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context)
+        msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
         result = await c["code_llm"].ainvoke(msgs)
         agent_output = _extract_text_content(result)
 
@@ -669,7 +734,7 @@ async def run_agent(
 
     data = _extract_from_text(agent_output)
     quality_metrics = None
-    if data.get("openscad_code"):
+    if data.get("openscad_code") and not _looks_like_cadquery(data["openscad_code"]):
         quality_metrics = _validate_code_quality(data["openscad_code"])
 
     # Populate extra metadata for caller (experiment + quality)
@@ -697,6 +762,7 @@ async def run_agent_stream(
     model: str | None = None,
     thinking: bool = False,
     db: AsyncSession | None = None,
+    code_language: str = "openscad",
 ) -> AsyncGenerator[dict, None]:
     """
     LLM streaming with tool call support (CADAM pattern).
@@ -746,7 +812,7 @@ async def run_agent_stream(
         try:
             t_rag = time.monotonic()
             is_jewelry = _detect_jewelry(user_input)
-            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
+            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry, code_language=code_language)
             logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
         except Exception as e:
             logger.warning(f"[STREAM][RAG] Failed: {e}")
@@ -756,7 +822,7 @@ async def run_agent_stream(
     if use_tools:
         system_prompt = AGENT_PROMPT
     else:
-        system_prompt, experiment_meta = _build_code_prompt(user_input, rag_context)
+        system_prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
     messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]
 
     # Mutable dict for code-gen calls to write experiment metadata into
@@ -774,7 +840,7 @@ async def run_agent_stream(
         elif image_data_urls:
             stream_source = c["code_llm"].astream(messages)
         else:
-            msgs, _direct_exp_meta = _build_direct_generation_messages(user_input, history, rag_context)
+            msgs, _direct_exp_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
             if _direct_exp_meta:
                 _exp_meta_out.update(_direct_exp_meta)
             stream_source = c["code_llm"].astream(msgs)
@@ -816,7 +882,7 @@ async def run_agent_stream(
 
                     try:
                         code_tokens = []
-                        async for token in _generate_code_stream(tool_args, history, c, user_input, rag_context, _experiment_meta_out=_exp_meta_out):
+                        async for token in _generate_code_stream(tool_args, history, c, user_input, rag_context, _experiment_meta_out=_exp_meta_out, code_language=code_language):
                             code_tokens.append(token)
                             yield {"type": "token", "text": token}
 
@@ -834,7 +900,7 @@ async def run_agent_stream(
                     yield {"type": "tool", "tool_name": tool_name, "status": "patching"}
 
                     patched = _handle_parameter_changes(tool_args, history)
-                    if patched and _looks_like_openscad(patched):
+                    if patched and (_looks_like_openscad(patched) or _looks_like_cadquery(patched)):
                         code_text = patched
                         full_text = patched
                         yield {"type": "token", "text": patched}
@@ -885,12 +951,16 @@ async def run_agent_stream(
     if rag_task is not None and not rag_task.done():
         rag_task.cancel()
 
-    # Fallback: if full_text contains OpenSCAD code but wasn't extracted via tools
+    # Fallback: if full_text contains code but wasn't extracted via tools
     if not code_text and full_text:
-        extracted = _extract_openscad_from_text(full_text)
-        if extracted:
-            logger.info("Fallback: Extracted OpenSCAD code from text response")
-            code_text = extracted
+        if _looks_like_cadquery(full_text):
+            code_text = _strip_code_fences(full_text)
+            logger.info("Fallback: Detected CadQuery code in text response")
+        else:
+            extracted = _extract_openscad_from_text(full_text)
+            if extracted:
+                logger.info("Fallback: Extracted OpenSCAD code from text response")
+                code_text = extracted
 
     logger.info(f"[STREAM] Complete, text_length={len(full_text)}, code_length={len(code_text)}")
 
@@ -899,45 +969,54 @@ async def run_agent_stream(
 
     # Build final response
     if code_text:
-        from app.cadquery.tasks import _clean_scad
-        code_text = _clean_scad(code_text)
-        quality_metrics = _validate_code_quality(code_text)
+        is_cadquery_code = _looks_like_cadquery(code_text)
 
-        # Self-correction: if severe issues found, ask LLM to fix
-        severe_issues = [i for i in quality_metrics.get("issues", [])
-                         if i in ("parts_mismatch", "uncalled_modules", "no_connections")]
-        if severe_issues and code_text:
-            logger.info(f"[QUALITY] Self-correcting: {severe_issues}")
-            fix_prompt = (
-                f"Fix this OpenSCAD code. Issues found: {', '.join(severe_issues)}.\n"
-                "Rules:\n"
-                "- Every planned part MUST have a module AND be called in main()\n"
-                "- All translate() values must use named connection variables, not magic numbers\n"
-                "- Parts must physically overlap parents (use eps for boolean joins)\n"
-                "- Arms hang DOWN from shoulders, legs extend DOWN from hips\n"
-                "Return ONLY the fixed OpenSCAD code, no explanations.\n\n"
-                f"{code_text}"
-            )
-            try:
-                fix_messages = [SystemMessage(content="Fix the OpenSCAD code as instructed. Return ONLY code."),
-                                HumanMessage(content=fix_prompt)]
-                yield {"type": "tool", "tool_name": "quality_fix", "status": "fixing"}
-                fixed_tokens = []
-                async for chunk in c["code_llm"].astream(fix_messages):
-                    token = _extract_text_content(chunk)
-                    if token:
-                        fixed_tokens.append(token)
-                        yield {"type": "token", "text": token}
-                fixed_code = _strip_code_fences("".join(fixed_tokens))
-                if _score_openscad_code(fixed_code) >= 3:
-                    code_text = _clean_scad(fixed_code)
-                    quality_metrics = _validate_code_quality(code_text)
-                    logger.info(f"[QUALITY] After fix: {quality_metrics.get('status')} issues={quality_metrics.get('issues')}")
-                yield {"type": "tool", "tool_name": "quality_fix", "status": "completed"}
-            except Exception as e:
-                logger.warning(f"[QUALITY] Self-correction failed: {e}")
+        if is_cadquery_code:
+            # CadQuery: strip fences only, skip OpenSCAD cleaning/quality
+            code_text = _strip_code_fences(code_text)
+            quality_metrics = None
+            parameters = _extract_parameters_from_cadquery(code_text)
+        else:
+            from app.cadquery.tasks import _clean_scad
+            code_text = _clean_scad(code_text)
+            quality_metrics = _validate_code_quality(code_text)
 
-        parameters = _extract_parameters_from_code(code_text)
+            # Self-correction: if severe issues found, ask LLM to fix (OpenSCAD only)
+            severe_issues = [i for i in quality_metrics.get("issues", [])
+                             if i in ("parts_mismatch", "uncalled_modules", "no_connections")]
+            if severe_issues and code_text:
+                logger.info(f"[QUALITY] Self-correcting: {severe_issues}")
+                fix_prompt = (
+                    f"Fix this OpenSCAD code. Issues found: {', '.join(severe_issues)}.\n"
+                    "Rules:\n"
+                    "- Every planned part MUST have a module AND be called in main()\n"
+                    "- All translate() values must use named connection variables, not magic numbers\n"
+                    "- Parts must physically overlap parents (use eps for boolean joins)\n"
+                    "- Arms hang DOWN from shoulders, legs extend DOWN from hips\n"
+                    "Return ONLY the fixed OpenSCAD code, no explanations.\n\n"
+                    f"{code_text}"
+                )
+                try:
+                    fix_messages = [SystemMessage(content="Fix the OpenSCAD code as instructed. Return ONLY code."),
+                                    HumanMessage(content=fix_prompt)]
+                    yield {"type": "tool", "tool_name": "quality_fix", "status": "fixing"}
+                    fixed_tokens = []
+                    async for chunk in c["code_llm"].astream(fix_messages):
+                        token = _extract_text_content(chunk)
+                        if token:
+                            fixed_tokens.append(token)
+                            yield {"type": "token", "text": token}
+                    fixed_code = _strip_code_fences("".join(fixed_tokens))
+                    if _score_openscad_code(fixed_code) >= 3:
+                        code_text = _clean_scad(fixed_code)
+                        quality_metrics = _validate_code_quality(code_text)
+                        logger.info(f"[QUALITY] After fix: {quality_metrics.get('status')} issues={quality_metrics.get('issues')}")
+                    yield {"type": "tool", "tool_name": "quality_fix", "status": "completed"}
+                except Exception as e:
+                    logger.warning(f"[QUALITY] Self-correction failed: {e}")
+
+            parameters = _extract_parameters_from_code(code_text)
+
         # Strip code blocks from agent text to get clean conversational message
         msg = re.sub(r'```[\s\S]*?```', '', agent_text).strip()
         if not msg:
@@ -953,7 +1032,7 @@ async def run_agent_stream(
     else:
         response = _extract_from_text(full_text)
         quality_metrics = None
-        if response.get("openscad_code"):
+        if response.get("openscad_code") and not _looks_like_cadquery(response["openscad_code"]):
             quality_metrics = _validate_code_quality(response["openscad_code"])
 
     # Attach experiment + quality data to response for persistence
