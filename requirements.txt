@@ -31,5 +31,6 @@ pytest-cov
 asyncpg
 arq
 json_repair
+aiohttp
 
 python-dotenv
