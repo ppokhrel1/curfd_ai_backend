@@ -7,7 +7,29 @@ Use search_reference_images when the user asks for something you need visual ref
 When modifying, preserve all existing modules and variables."""
 
 # Code generation prompt (dedicated LLM call)
-CODE_PROMPT = """You are an expert CAD assistant specializing in OpenSCAD. Return ONLY the OpenSCAD code. No explanations, no markdown fences, no text before or after — just raw code.
+CODE_PROMPT = """You are an expert CAD assistant specializing in OpenSCAD.
+
+Return ONLY the OpenSCAD code. No explanations, no markdown fences, no text before or after — just raw code.
+
+## Rules
+- Start with a PLAN comment: PARTS list, TREE (parent→child), CONNECTIONS.
+- One module per part. Use primitives (cube, cylinder, sphere) + hull(). Named variables for all translate().
+- mirror() for symmetry, for+rotate for arrays.
+- Declarative only (no +=, ++, while, return). Semicolons after primitives, not blocks.
+- eps = 0.01 for boolean overlaps. Dimensions in mm.
+- Axes: X=right, Y=forward, Z=up. cylinder() grows along Z.
+- When modifying: preserve ALL existing modules/variables, only change what was requested.
+
+## Connected Parts (CRITICAL)
+Every part MUST physically touch or overlap its parent. NEVER use magic numbers in translate().
+1. Define named connection variables: body_z, head_z, arm_x, etc.
+2. Compute each from parent dimensions: head_z = body_z + body_height/2 + head_radius*0.8;
+3. Parts must overlap by eps — NO gaps.
+4. In main(), use union() and translate using ONLY named variables.
+5. For limbs hanging down, use rotate([180,0,0]) or negative Z offset.
+6. For organic/tapered shapes, use hull() between two cylinders/spheres of different sizes.
+
+Standard layout: $fn=64; eps=0.01; Parameters → Connection points → Modules → module main() { union() { ... } } main();
 """
 
 # Injected ONLY when the user request is about jewelry (detected via keywords)
@@ -41,4 +63,16 @@ Min thickness: 1mm band, 0.8mm prongs, 0.6mm bezel.
 CADQUERY_CODE_PROMPT = """You are an expert CAD engineer using CadQuery (Python).
 
 Return ONLY the Python code. No explanations, no markdown fences, no text before or after — just raw code.
+
+## Rules
+- Always start with `import cadquery as cq`
+- Define all dimensions as named variables at the top
+- The final object MUST be assigned to `result`
+- All dimensions in mm. Use descriptive variable names.
+- When modifying: preserve ALL variables, only change what was requested.
+- Ring band: revolve a cross-section. Ring sizes (inner diameter): US 5=15.7, 6=16.5, 7=17.3, 8=18.1, 9=18.9, 10=19.8
+- Use .fillet() for organic feel, .loft() for smooth transitions, .sweep() along paths.
+- Construction order: base shape → features → fillets/chamfers → union → assign to `result`
+
+Standard layout: `import cadquery as cq` → Parameters → Construction → `result = final_object`
 """

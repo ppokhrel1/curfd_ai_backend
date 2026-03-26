@@ -12,6 +12,7 @@ _DEFAULTS = {
     "gemini": "gemini-2.5-flash",
     "anthropic": "claude-sonnet-4-6",
     "groq": "llama-3.3-70b-versatile",
+    "openai": "gpt-4o",
 }
 
 # Providers that support extended thinking
@@ -70,6 +71,16 @@ def get_llm(
             logger.info(f"[LLM] Creating Anthropic LLM: model={model}, temp={temperature}, max_tokens={max_tokens}")
 
         return ChatAnthropic(**kwargs)
+    elif provider == "openai":
+        from langchain_openai import ChatOpenAI
+
+        logger.info(f"[LLM] Creating OpenAI LLM: model={model}, temp={temperature}, max_tokens={max_tokens}")
+        return ChatOpenAI(
+            model=model,
+            api_key=settings.openai_api_key or os.getenv("OPENAI_API_KEY"),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     elif provider == "groq":
         from langchain_groq import ChatGroq
 
