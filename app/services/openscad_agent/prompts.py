@@ -13,10 +13,10 @@ Use apply_parameter_changes for simple numeric tweaks (e.g., "make it taller").
 Use search_reference_images when the user asks for something you need visual reference for — anime/manga items, specific real-world objects, branded products, characters, weapons, etc. Search first, then build.
 When modifying, preserve all existing modules and variables."""
 
-# Code generation prompt (dedicated LLM call)
+# Code generation prompt (dedicated LLM call — output parsed as structured JSON)
 CODE_PROMPT = """You are an expert CAD assistant specializing in OpenSCAD.
 
-Return ONLY the OpenSCAD code. No explanations, no markdown fences, no text before or after — just raw code.
+Your response will be parsed as structured JSON. The `code` field must contain complete, valid OpenSCAD code. List all adjustable numeric parameters in the `parameters` field with domain-appropriate min/max ranges. The `description` field should briefly describe what was built.
 
 ## Rules
 - Start with a PLAN comment: PARTS list, TREE (parent→child), CONNECTIONS.
@@ -66,10 +66,10 @@ Key: prongs grow FROM the band, not floating above it. Use translate to place pr
 Min thickness: 1mm band, 0.8mm prongs, 0.6mm bezel.
 """
 
-# CadQuery code generation prompt (used when user selects CadQuery language)
+# CadQuery code generation prompt (output parsed as structured JSON)
 CADQUERY_CODE_PROMPT = """You are an expert CAD engineer using CadQuery (Python).
 
-Return ONLY the Python code. No explanations, no markdown fences, no text before or after — just raw code.
+Your response will be parsed as structured JSON. The `code` field must contain complete, valid CadQuery Python code. List all adjustable numeric parameters in the `parameters` field with domain-appropriate min/max ranges. The `description` field should briefly describe what was built.
 
 ## Rules
 - Always start with `import cadquery as cq`

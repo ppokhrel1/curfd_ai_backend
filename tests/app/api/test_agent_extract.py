@@ -1,14 +1,14 @@
-"""Tests for agent helper functions (_extract_from_text, _extract_parameters_from_code, _score_openscad_code, etc.)."""
+"""Tests for agent helper functions (_extract_parameters_from_code, _score_openscad_code, etc.)."""
 
 import pytest
 
 from app.services.openscad_agent.agent import (
-    _extract_from_text,
     _extract_parameters_from_code,
     _score_openscad_code,
-    _extract_openscad_from_text,
     _looks_like_openscad,
     _strip_code_fences,
+    CodeGenResult,
+    CodeParameter,
 )
 
 
@@ -131,31 +131,6 @@ def test_looks_like_openscad_false():
     assert _looks_like_openscad("This is just text") is False
 
 
-# ── _extract_openscad_from_text ──────────────────────────────────────────────
-
-def test_extract_openscad_from_text_code_block():
-    text = "Here is your model:\n\n```openscad\ncube([10, 10, 10]);\nsphere(r=5);\nmodule foo() {}\n```\n"
-    code = _extract_openscad_from_text(text)
-    assert code is not None
-    assert "cube([10, 10, 10]);" in code
-
-
-def test_extract_openscad_from_text_raw_code():
-    """Raw OpenSCAD without fences should be extracted if score >= 5."""
-    code = "$fn=64;\nwidth=20;\nheight=30;\nmodule box() {\n  cube([width,width,height]);\n}\ntranslate([0,0,0]) box();\n"
-    result = _extract_openscad_from_text(code)
-    assert result is not None
-    assert "cube" in result
-
-
-def test_extract_openscad_from_text_no_code():
-    assert _extract_openscad_from_text("Just a regular chat message.") is None
-
-
-def test_extract_openscad_from_text_empty():
-    assert _extract_openscad_from_text("") is None
-
-
 # ── _strip_code_fences ───────────────────────────────────────────────────────
 
 def test_strip_code_fences_openscad():
@@ -173,57 +148,32 @@ def test_strip_code_fences_no_fences():
     assert _strip_code_fences(code) == "cube([10,10,10]);"
 
 
-# ── _extract_from_text ───────────────────────────────────────────────────────
+# ── CodeGenResult schema ────────────────────────────────────────────────────
 
-def test_extract_from_text_code_block():
-    text = "Here is a cube:\n\n```openscad\ncube([10, 10, 10]);\n```\n\nEnjoy!"
-    result = _extract_from_text(text)
-    assert result["openscad_code"] == "cube([10, 10, 10]);"
-    assert result["model_type"] == "mechanical"
-    assert "cube" in result["message"].lower() or "Here" in result["message"]
-
-
-def test_extract_from_text_sentinel_code():
-    """Test that sentinel-delimited code from apply_parameter_changes is extracted."""
-    text = (
-        "PATCHED 1 parameter(s): width: 20 -> 40\n"
-        "\n---PATCHED_CODE_START---\n"
-        "width = 40;\ncube([width, width, 10]);\n"
-        "\n---PATCHED_CODE_END---"
+def test_code_gen_result_schema():
+    """Verify the structured output schema can be instantiated."""
+    result = CodeGenResult(
+        code="cube([10, 10, 10]);",
+        parameters=[
+            CodeParameter(name="size", value=10.0, min_val=5.0, max_val=20.0, description="Cube size"),
+        ],
+        description="A simple cube",
     )
-    result = _extract_from_text(text)
-    assert "width = 40;" in result["openscad_code"]
-    assert result["model_type"] == "mechanical"
+    assert result.code == "cube([10, 10, 10]);"
+    assert len(result.parameters) == 1
+    assert result.parameters[0].name == "size"
+    assert result.parameters[0].min_val == 5.0
 
 
-def test_extract_from_text_no_code():
-    text = "OpenSCAD is a great tool for parametric design!"
-    result = _extract_from_text(text)
-    assert result["openscad_code"] == ""
-    assert result["model_type"] == "chat"
-    assert "OpenSCAD" in result["message"]
-
-
-def test_extract_from_text_message_truncation():
-    long_message = "A" * 600 + "\n```openscad\ncube(10);\n```"
-    result = _extract_from_text(long_message)
-    assert len(result["message"]) <= 500
-
-
-def test_extract_from_text_code_block_preferred_over_sentinel():
-    """If both code block and sentinel exist, code block should win."""
-    text = (
-        "```openscad\ncube([20, 20, 20]);\n```\n"
-        "\n---PATCHED_CODE_START---\ncube([10, 10, 10]);\n---PATCHED_CODE_END---"
+def test_code_gen_result_to_dict():
+    """Verify model_dump produces the right structure."""
+    result = CodeGenResult(
+        code="sphere(r=5);",
+        parameters=[
+            CodeParameter(name="radius", value=5.0, min_val=1.0, max_val=15.0, description="Sphere radius"),
+        ],
+        description="A sphere",
     )
-    result = _extract_from_text(text)
-    # The code block version should be used (20, not 10)
-    assert "20" in result["openscad_code"]
-
-
-def test_extract_from_text_raw_openscad_fallback():
-    """Test that raw OpenSCAD code is extracted via score-based fallback."""
-    raw_code = "$fn=64;\nwidth=20;\nheight=30;\nmodule box() {\n  cube([width,width,height]);\n}\ntranslate([0,0,0]) box();\n"
-    result = _extract_from_text(raw_code)
-    assert result["openscad_code"] != ""
-    assert result["model_type"] == "mechanical"
+    params = [p.model_dump() for p in result.parameters]
+    assert params[0]["name"] == "radius"
+    assert params[0]["value"] == 5.0

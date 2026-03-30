@@ -1,10 +1,11 @@
 import asyncio
+import json
 import logging
 import re
 import time
 from collections.abc import AsyncGenerator
 
-
+from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,30 +50,56 @@ _tools_by_name = {t.name: t for t in _tools}
 # ── Component factory ────────────────────────────────────────────────────────
 
 def _get_components(provider: str | None = None, model: str | None = None, thinking: bool = False):
-    """Create LLM + chains for a given provider/model pair."""
-    # Agent (tool routing) never needs thinking — it just picks tools
-    llm = get_llm(provider, model, False)
+    """Create LLM components for a given provider/model pair.
+
+    Uses a single LLM instance for both agent routing and code generation.
+    Tool calling is enabled for all major providers.
+    """
     resolved_provider = (provider or settings.llm_provider).lower()
+    llm = get_llm(provider, model, thinking)
 
-    tools_supported = resolved_provider in ("anthropic",)
+    tools_supported = resolved_provider in ("anthropic", "openai", "gemini", "groq")
     llm_with_tools = llm.bind_tools(_tools) if tools_supported else None
-
-    # Code-gen LLM gets thinking if user requested it (this is where it matters)
-    code_llm = get_llm(
-        provider,
-        settings.code_gen_model or model,
-        thinking,
-        temperature_override=settings.code_gen_temperature,
-        max_tokens_override=settings.code_gen_max_tokens,
-    )
 
     return {
         "llm": llm,
-        "code_llm": code_llm,
+        "code_llm": llm,  # Same LLM for code gen — simpler, consistent quality
         "llm_with_tools": llm_with_tools,
         "tools_supported": tools_supported,
         "provider": resolved_provider,
     }
+
+
+# ── Structured output schema ─────────────────────────────────────────────────
+
+class CodeParameter(BaseModel):
+    """A single adjustable numeric parameter from generated CAD code."""
+    name: str = Field(description="Variable name exactly as it appears in the code")
+    value: float = Field(description="Current default numeric value")
+    min_val: float = Field(description="Reasonable minimum value for this parameter")
+    max_val: float = Field(description="Reasonable maximum value for this parameter")
+    description: str = Field(description="Brief description of what this parameter controls")
+
+
+class CodeGenResult(BaseModel):
+    """Structured output from CAD code generation."""
+    code: str = Field(description="Complete CAD code (OpenSCAD or CadQuery Python) without markdown fences")
+    parameters: list[CodeParameter] = Field(description="All adjustable numeric parameters from the code with domain-appropriate min/max ranges")
+    description: str = Field(description="Brief friendly description of what was built or modified")
+
+
+def _get_structured_llm(components: dict):
+    """Wrap the code LLM with structured output for deterministic extraction."""
+    llm = components["code_llm"]
+    provider = components["provider"]
+    # Anthropic needs json_schema method for thinking mode compatibility
+    if provider == "anthropic":
+        method = "json_schema"
+    elif provider == "gemini":
+        method = "json_mode"
+    else:
+        method = "function_calling"
+    return llm.with_structured_output(CodeGenResult, method=method)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -175,19 +202,16 @@ async def _generate_code(
     rag_context: str = "",
     _experiment_meta_out: dict | None = None,
     code_language: str = "openscad",
-) -> str:
-    """Make a separate LLM call with CODE_PROMPT to generate code.
+) -> CodeGenResult:
+    """Generate code using structured output for deterministic extraction.
 
-    Matches CADAM's handleToolCall pattern:
-    - System: CODE_PROMPT or CADQUERY_CODE_PROMPT (+ RAG examples if available)
-    - ...full conversation history (history already excludes current user msg)
-    - (optional) Assistant: baseCode
-    - User: original user request (+ error context if present)
+    Uses LangChain's with_structured_output() to force the LLM to return
+    a CodeGenResult with code, parameters, and description — no regex needed.
     """
     base_code = tool_args.get("baseCode", "")
     error = tool_args.get("error", "")
 
-    # Build code generation messages (CADAM pattern) with RAG + domain context
+    # Build code generation messages with RAG + domain context
     prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
     if experiment_meta and _experiment_meta_out is not None:
         _experiment_meta_out.update(experiment_meta)
@@ -206,57 +230,30 @@ async def _generate_code(
 
     code_messages.append(HumanMessage(content=user_text))
 
-    llm = components["code_llm"]
     t_code = time.monotonic()
-    result = await llm.ainvoke(code_messages)
-    code = _extract_text_content(result)
-    logger.info(f"[CODE_GEN] {time.monotonic() - t_code:.2f}s — {len(code)} chars")
-
-    # Strip markdown fences if present
-    code = _strip_code_fences(code)
-
-    return code
-
-
-async def _generate_code_stream(
-    tool_args: dict,
-    history: list[HumanMessage | AIMessage],
-    components: dict,
-    user_input: str = "",
-    rag_context: str = "",
-    _experiment_meta_out: dict | None = None,
-    code_language: str = "openscad",
-) -> AsyncGenerator[str, None]:
-    """Stream code generation tokens from a separate LLM call with CODE_PROMPT.
-
-    Matches CADAM's pattern: uses original user_input, not tool's paraphrased text.
-    RAG context is appended to CODE_PROMPT when available.
-    """
-    base_code = tool_args.get("baseCode", "")
-    error = tool_args.get("error", "")
-
-    prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
-    if experiment_meta and _experiment_meta_out is not None:
-        _experiment_meta_out.update(experiment_meta)
-    code_messages: list = [SystemMessage(content=prompt)]
-    code_messages.extend(history)
-
-    if base_code:
-        code_messages.append(AIMessage(content=base_code))
-
-    # Always use original user message
-    user_text = user_input
-    if error:
-        error_label = "CadQuery Python" if code_language == "cadquery" else "OpenSCAD"
-        user_text = f"{user_input}\n\nFix this {error_label} error: {error}"
-
-    code_messages.append(HumanMessage(content=user_text))
-
-    llm = components["code_llm"]
-    async for chunk in llm.astream(code_messages):
-        token = _extract_text_content(chunk)
-        if token:
-            yield token
+    try:
+        structured_llm = _get_structured_llm(components)
+        result = await structured_llm.ainvoke(code_messages)
+        logger.info(f"[CODE_GEN] Structured output: {time.monotonic() - t_code:.2f}s — {len(result.code)} chars, {len(result.parameters)} params")
+        return result
+    except Exception as e:
+        # Fallback: raw invoke + manual extraction
+        logger.warning(f"[CODE_GEN] Structured output failed ({e}), falling back to raw invoke")
+        llm = components["code_llm"]
+        raw_result = await llm.ainvoke(code_messages)
+        raw_text = _extract_text_content(raw_result)
+        code = _strip_code_fences(raw_text)
+        # Extract parameters with regex as fallback
+        if _looks_like_cadquery(code):
+            params = _extract_parameters_from_cadquery(code)
+        else:
+            params = _extract_parameters_from_code(code)
+        logger.info(f"[CODE_GEN] Fallback: {time.monotonic() - t_code:.2f}s — {len(code)} chars")
+        return CodeGenResult(
+            code=code,
+            parameters=[CodeParameter(**p) for p in params],
+            description="Model generated.",
+        )
 
 
 def _handle_parameter_changes(
@@ -292,12 +289,14 @@ async def _run_tool_loop(
     image_data_urls: list[str] | None = None,
     rag_context: str = "",
     code_language: str = "openscad",
-) -> str:
+) -> dict:
     """
-    Manual tool-calling loop matching CADAM's pattern:
+    Manual tool-calling loop:
     - Outer agent uses AGENT_PROMPT with tools
-    - build_parametric_model → separate LLM call with CODE_PROMPT + RAG
+    - build_parametric_model → structured output code gen
     - apply_parameter_changes → regex patching of current code
+
+    Returns dict with openscad_code, parameters, model_type, message.
     """
     llm_with_tools = components["llm_with_tools"]
     llm = components["llm"]
@@ -315,7 +314,8 @@ async def _run_tool_loop(
         messages.append(response)
 
         if not response.tool_calls:
-            return _extract_text_content(response)
+            text = _extract_text_content(response)
+            return {"openscad_code": "", "parameters": [], "model_type": "chat", "message": text}
 
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
@@ -323,15 +323,24 @@ async def _run_tool_loop(
             tool_id = tool_call.get("id", tool_name)
 
             if tool_name == "build_parametric_model":
-                # CADAM pattern: separate LLM call with CODE_PROMPT + RAG context
-                code = await _generate_code(tool_args, history, components, user_input, rag_context, code_language=code_language)
-                logger.info(f"Code generation returned {len(code)} chars")
-                return code
+                gen_result = await _generate_code(tool_args, history, components, user_input, rag_context, code_language=code_language)
+                logger.info(f"Code generation returned {len(gen_result.code)} chars, {len(gen_result.parameters)} params")
+                return {
+                    "openscad_code": gen_result.code,
+                    "parameters": [p.model_dump() for p in gen_result.parameters],
+                    "model_type": "mechanical",
+                    "message": gen_result.description,
+                }
 
             elif tool_name == "apply_parameter_changes":
-                # CADAM pattern: regex patching of current artifact code
                 result = _handle_parameter_changes(tool_args, history)
-                return result
+                if _looks_like_openscad(result) or _looks_like_cadquery(result):
+                    if _looks_like_cadquery(result):
+                        params = _extract_parameters_from_cadquery(result)
+                    else:
+                        params = _extract_parameters_from_code(result)
+                    return {"openscad_code": result, "parameters": params, "model_type": "mechanical", "message": "Parameters updated."}
+                return {"openscad_code": "", "parameters": [], "model_type": "chat", "message": result}
 
             else:
                 # Fallback: execute tool normally (e.g. search_reference_images)
@@ -358,10 +367,11 @@ async def _run_tool_loop(
                     messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
 
     response = await llm.ainvoke(messages)
-    return _extract_text_content(response)
+    text = _extract_text_content(response)
+    return {"openscad_code": "", "parameters": [], "model_type": "chat", "message": text}
 
 
-# ── Extraction (regex-based, no extra LLM call) ──────────────────────────────
+# ── Extraction helpers (kept for patching and history detection) ──────────────
 
 _CODE_BLOCK_RE = re.compile(r"```(?:openscad|python)?\s*\n(.*?)```", re.DOTALL)
 _PARAM_RE = re.compile(
@@ -372,13 +382,11 @@ _IGNORED_VARS = frozenset({"$fn", "$fa", "$fs", "eps", "epsilon"})
 
 
 def _strip_code_fences(code: str) -> str:
-    """Strip markdown code fences from generated code."""
+    """Strip markdown code fences from generated code (used only as fallback)."""
     code = code.strip()
-    # Try full-match first (entire response is a code block)
     match = re.match(r'^```(?:openscad|python)?\n?([\s\S]*?)\n?```$', code)
     if match:
         return match.group(1).strip()
-    # Try extracting the best code block
     code_match = _CODE_BLOCK_RE.search(code)
     if code_match:
         return code_match.group(1).strip()
@@ -386,7 +394,7 @@ def _strip_code_fences(code: str) -> str:
 
 
 def _extract_parameters_from_code(code: str) -> list[dict]:
-    """Extract tunable parameters from OpenSCAD top-level variable assignments."""
+    """Extract tunable parameters from OpenSCAD code (used for patched code fallback)."""
     params = []
     for m in _PARAM_RE.finditer(code):
         name = m.group(1)
@@ -409,10 +417,9 @@ def _extract_parameters_from_code(code: str) -> list[dict]:
 
 
 def _score_openscad_code(code: str) -> int:
-    """Score how likely text is to be OpenSCAD code (matches CADAM's scoreOpenSCADCode)."""
+    """Score how likely text is to be OpenSCAD code."""
     if not code or len(code) < 20:
         return 0
-
     score = 0
     patterns = [
         r'\b(cube|sphere|cylinder|polyhedron)\s*\(',
@@ -422,39 +429,32 @@ def _score_openscad_code(code: str) -> int:
         r'\b(module|function)\s+\w+\s*\(',
         r'\$fn\s*=',
         r'\bfor\s*\(\s*\w+\s*=\s*\[',
-        r'\bimport\s*\(\s*"',
         r';\s*$',
     ]
     for p in patterns:
         matches = re.findall(p, code, re.MULTILINE)
         if matches:
             score += len(matches)
-
-    # Variable declarations
     var_decls = re.findall(r'^\s*\w+\s*=\s*[^;]+;', code, re.MULTILINE)
     if var_decls:
         score += min(len(var_decls), 5)
-
     return score
 
 
 def _validate_code_quality(code: str) -> dict:
-    """Validate generated OpenSCAD code and return quality metrics."""
+    """Validate generated OpenSCAD code and return quality metrics (logging only)."""
     metrics: dict = {}
     if not code or len(code) < 20:
         return metrics
 
-    # 1. Extract PLAN comments
     plan_parts = re.findall(r'//\s*PARTS:\s*(.+)', code)
     planned = [p.strip() for p in plan_parts[0].split(',')]  if plan_parts else []
     metrics["planned_parts"] = len(planned)
 
-    # 2. Defined modules (including parameterized ones, excluding main)
     defined = re.findall(r'^\s*module\s+([a-zA-Z_]\w*)\s*\(', code, re.MULTILINE)
     defined = [m for m in defined if m not in ('main',)]
     metrics["defined_modules"] = len(defined)
 
-    # 3. Count module calls in main() (including repeated calls like arm(1), arm(-1))
     main_match = re.search(r'module\s+main\s*\(\s*\)\s*\{', code)
     called_in_main = []
     call_count_in_main = 0
@@ -467,41 +467,30 @@ def _validate_code_quality(code: str) -> dict:
         main_body = code[main_match.end():i - 1] if depth == 0 else ""
         all_calls = re.findall(r'\b([a-zA-Z_]\w*)\s*\(', main_body)
         called_in_main = list(set(c for c in all_calls if c in defined))
-        # Count total calls (arm called twice = 2 parts)
         call_count_in_main = sum(1 for c in all_calls if c in defined)
     metrics["called_in_main"] = len(called_in_main)
     metrics["call_count_in_main"] = call_count_in_main
 
-    # 4. Count mirror() uses in main (each mirror doubles a part)
     if main_match:
         mirror_count = len(re.findall(r'\bmirror\s*\(', main_body))
-        call_count_in_main += mirror_count  # each mirror effectively doubles
+        call_count_in_main += mirror_count
     metrics["effective_parts"] = call_count_in_main
 
-    # 5. Connection point variables
     conn_vars = re.findall(r'^\s*([a-zA-Z_]\w*(?:_[xyz]|_offset|_pos|_attach|_z|_y|_x))\s*=', code, re.MULTILINE)
     metrics["connection_vars"] = len(conn_vars)
 
-    # 6. Magic numbers in translate (numbers not from variables)
     translates = re.findall(r'translate\(\[([^\]]+)\]', code)
     magic_count = 0
     for t in translates:
-        # Only count bare numeric literals > 5 (small offsets are OK)
         nums = re.findall(r'(?<![a-zA-Z_\.])\d+\.?\d*', t)
         magic_count += sum(1 for n in nums if float(n) > 5)
     metrics["magic_numbers_in_translate"] = magic_count
 
-    # 7. Uncalled modules (defined but not called in main)
     uncalled = [m for m in defined if m not in called_in_main]
     metrics["uncalled_modules"] = len(uncalled)
-
-    # 8. Has eps usage
     metrics["uses_eps"] = bool(re.search(r'\beps\b', code))
-
-    # 9. Has TREE comment
     metrics["has_tree"] = bool(re.search(r'//\s*TREE:', code))
 
-    # Log structured metrics — use effective_parts for comparison
     issues = []
     if metrics["planned_parts"] > 0 and metrics["effective_parts"] < metrics["planned_parts"] - 1:
         issues.append("parts_mismatch")
@@ -523,12 +512,11 @@ def _validate_code_quality(code: str) -> dict:
         metrics["called_in_main"], metrics["effective_parts"], metrics["connection_vars"],
         metrics["magic_numbers_in_translate"], metrics["has_tree"], issues or "none",
     )
-
     return metrics
 
 
 def _looks_like_openscad(text: str) -> bool:
-    """Quick heuristic to detect raw OpenSCAD code without markdown fences."""
+    """Quick heuristic to detect raw OpenSCAD code."""
     return _score_openscad_code(text) >= 3
 
 
@@ -545,14 +533,13 @@ _IGNORED_PYTHON_VARS = frozenset({"result", "cq", "pi", "tau", "e"})
 
 
 def _extract_parameters_from_cadquery(code: str) -> list[dict]:
-    """Extract tunable parameters from CadQuery Python top-level variable assignments."""
+    """Extract tunable parameters from CadQuery code (used for patched code fallback)."""
     params = []
     for m in _PYTHON_PARAM_RE.finditer(code):
         name = m.group(1)
         val = float(m.group(2))
         if name in _IGNORED_PYTHON_VARS or name.startswith("_"):
             continue
-        # Stop once we hit construction code (past the parameters section)
         preceding = code[:m.start()]
         if "cq.Workplane" in preceding or "\ndef " in preceding:
             break
@@ -569,104 +556,6 @@ def _extract_parameters_from_cadquery(code: str) -> list[dict]:
             "description": f"Parameter: {name}",
         })
     return params
-
-
-def _extract_openscad_from_text(text: str) -> str | None:
-    """Extract OpenSCAD code from text response (CADAM's extractOpenSCADCodeFromText).
-
-    Handles cases where the LLM outputs code directly instead of using tools.
-    """
-    if not text:
-        return None
-
-    # First try to extract from markdown code blocks
-    best_code = None
-    best_score = 0
-
-    for match in re.finditer(r'```(?:openscad)?\s*\n?([\s\S]*?)\n?```', text):
-        code = match.group(1).strip()
-        score = _score_openscad_code(code)
-        if score > best_score:
-            best_score = score
-            best_code = code
-
-    # If we found code in a code block with a good score, return it
-    if best_code and best_score >= 3:
-        return best_code
-
-    # If no code blocks, check if the entire text looks like OpenSCAD code
-    raw_score = _score_openscad_code(text)
-    if raw_score >= 5:  # Higher threshold for raw text
-        return text.strip()
-
-    return None
-
-
-def _extract_from_text(text: str) -> dict:
-    """Extract OpenSCAD code and metadata from LLM output via regex."""
-    from app.cadquery.tasks import _clean_scad
-
-    code_match = _CODE_BLOCK_RE.search(text)
-    code = code_match.group(1).strip() if code_match else ""
-
-    # Fallback: check for sentinel-delimited patched code from apply_parameter_changes
-    if not code:
-        patched_match = re.search(
-            r"---PATCHED_CODE_START---\n(.*?)\n---PATCHED_CODE_END---",
-            text, re.DOTALL,
-        )
-        if patched_match:
-            code = patched_match.group(1).strip()
-
-    # Fallback: try CADAM-style extraction (score-based) or CadQuery detection
-    if not code:
-        if _looks_like_cadquery(text):
-            code = _strip_code_fences(text)
-        else:
-            extracted = _extract_openscad_from_text(text)
-            if extracted:
-                code = extracted
-
-    if code:
-        if not _looks_like_cadquery(code):
-            code = _clean_scad(code)
-
-    if code_match:
-        message = text[: code_match.start()].strip()
-        if not message:
-            after = text[code_match.end() :].strip()
-            message = after if after else ""
-    else:
-        message = "" if code else text.strip()
-
-    # If we extracted code from raw text, clean the message
-    if code and not code_match and message:
-        # Remove the code from the text to get just the message
-        cleaned = text.replace(code, "").strip()
-        # Remove markdown code blocks
-        cleaned = re.sub(r'```(?:openscad)?\s*\n?[\s\S]*?\n?```', '', cleaned).strip()
-        message = cleaned if len(cleaned) >= 10 else ""
-
-    if not message:
-        message = "Model generated." if code else "Here to help!"
-
-    if len(message) > 500:
-        message = message[:500]
-
-    if code and _looks_like_cadquery(code):
-        parameters = _extract_parameters_from_cadquery(code)
-    elif code:
-        parameters = _extract_parameters_from_code(code)
-    else:
-        parameters = []
-    model_type = "chat" if not code else "mechanical"
-
-    return {
-        "openscad_code": code,
-        "parameters": parameters,
-        "model_type": model_type,
-        "message": message,
-    }
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -689,7 +578,7 @@ async def run_agent(
     """
     t_start = time.monotonic()
     c = _get_components(provider, model, thinking)
-    logger.info(f"[AGENT] Starting request: provider={c['provider']}, model={model}, thinking={thinking}")
+    logger.info(f"[AGENT] Starting request: provider={c['provider']}, model={model}, thinking={thinking}, code_language={code_language}")
 
     # Start RAG fetch in parallel with agent work
     rag_context = ""
@@ -713,36 +602,76 @@ async def run_agent(
 
     experiment_meta = None
     if image_data_urls:
+        # Images: use structured output for direct code gen
         human_msg = _build_human_message(user_input, image_data_urls)
         prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
         messages = [SystemMessage(content=prompt)] + list(history) + [human_msg]
-        result = await c["code_llm"].ainvoke(messages)
-        agent_output = _extract_text_content(result)
+        try:
+            structured_llm = _get_structured_llm(c)
+            gen_result = await structured_llm.ainvoke(messages)
+            data = {
+                "openscad_code": gen_result.code,
+                "parameters": [p.model_dump() for p in gen_result.parameters],
+                "model_type": "mechanical",
+                "message": gen_result.description,
+            }
+        except Exception as e:
+            logger.warning(f"[AGENT] Structured output failed for image path: {e}")
+            result = await c["code_llm"].ainvoke(messages)
+            raw = _extract_text_content(result)
+            code = _strip_code_fences(raw)
+            params = _extract_parameters_from_cadquery(code) if _looks_like_cadquery(code) else _extract_parameters_from_code(code)
+            data = {"openscad_code": code, "parameters": params, "model_type": "mechanical", "message": "Model generated."}
     elif c["tools_supported"] and c["llm_with_tools"] is not None:
         try:
-            agent_output = await _run_tool_loop(
+            data = await _run_tool_loop(
                 user_input, history, settings.agent_max_iterations,
                 c, rag_context=rag_context, code_language=code_language,
             )
         except Exception as e:
             logger.error(f"Tool loop failed, falling back to direct generation: {e}")
             msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
-            result = await c["code_llm"].ainvoke(msgs)
-            agent_output = _extract_text_content(result)
+            try:
+                structured_llm = _get_structured_llm(c)
+                gen_result = await structured_llm.ainvoke(msgs)
+                data = {
+                    "openscad_code": gen_result.code,
+                    "parameters": [p.model_dump() for p in gen_result.parameters],
+                    "model_type": "mechanical",
+                    "message": gen_result.description,
+                }
+            except Exception as e2:
+                logger.warning(f"[AGENT] Structured fallback also failed: {e2}")
+                result = await c["code_llm"].ainvoke(msgs)
+                raw = _extract_text_content(result)
+                data = {"openscad_code": "", "parameters": [], "model_type": "chat", "message": raw[:500]}
     else:
+        # No tools: direct structured code gen
         msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
-        result = await c["code_llm"].ainvoke(msgs)
-        agent_output = _extract_text_content(result)
+        try:
+            structured_llm = _get_structured_llm(c)
+            gen_result = await structured_llm.ainvoke(msgs)
+            data = {
+                "openscad_code": gen_result.code,
+                "parameters": [p.model_dump() for p in gen_result.parameters],
+                "model_type": "mechanical",
+                "message": gen_result.description,
+            }
+        except Exception as e:
+            logger.warning(f"[AGENT] Structured output failed: {e}")
+            result = await c["code_llm"].ainvoke(msgs)
+            raw = _extract_text_content(result)
+            code = _strip_code_fences(raw)
+            params = _extract_parameters_from_cadquery(code) if _looks_like_cadquery(code) else _extract_parameters_from_code(code)
+            data = {"openscad_code": code, "parameters": params, "model_type": "mechanical", "message": "Model generated."}
 
     t_total = time.monotonic() - t_start
-    logger.info(f"[AGENT] Completed in {t_total:.2f}s — output {len(agent_output)} chars")
+    logger.info(f"[AGENT] Completed in {t_total:.2f}s")
 
-    data = _extract_from_text(agent_output)
     quality_metrics = None
     if data.get("openscad_code") and not _looks_like_cadquery(data["openscad_code"]):
         quality_metrics = _validate_code_quality(data["openscad_code"])
 
-    # Populate extra metadata for caller (experiment + quality)
     if _extra_meta is not None:
         if experiment_meta:
             _extra_meta["experiment"] = experiment_meta
@@ -770,23 +699,23 @@ async def run_agent_stream(
     code_language: str = "openscad",
 ) -> AsyncGenerator[dict, None]:
     """
-    LLM streaming with tool call support (CADAM pattern).
+    LLM streaming with structured output for code generation.
 
     Flow:
-    1. Fetch RAG examples from DB (vector search) or web search
+    1. Fetch RAG examples from DB (vector search)
     2. Stream outer agent (AGENT_PROMPT) text tokens
-    3. On build_parametric_model tool call → separate code gen with CODE_PROMPT + RAG
-    4. On apply_parameter_changes tool call → regex patch current code
-    5. Fallback: extract OpenSCAD from text if no tool was used
+    3. On build_parametric_model → structured output code gen (deterministic)
+    4. On apply_parameter_changes → regex patch current code
+    5. Direct gen (no tools) → structured output
 
     Yields:
         {"type": "token", "text": "..."} for each text token
         {"type": "tool", "tool_name": ..., "status": ...} when a tool executes
-        {"type": "done", "data": {...}} at the end with extracted structured data
+        {"type": "done", "data": {...}} at the end with structured data
     """
     t_start = time.monotonic()
     c = _get_components(provider, model, thinking)
-    logger.info(f"[STREAM] Starting: provider={c['provider']}, model={model}, thinking={thinking}")
+    logger.info(f"[STREAM] Starting: provider={c['provider']}, model={model}, thinking={thinking}, code_language={code_language}")
 
     human_msg = _build_human_message(user_input, image_data_urls)
 
@@ -796,11 +725,10 @@ async def run_agent_stream(
         and c["llm_with_tools"] is not None
     )
 
-    # Start RAG fetch in parallel with agent routing (only needed at code-gen time)
+    # Start RAG fetch in parallel with agent routing
     rag_context = ""
     rag_task: asyncio.Task | None = None
     if db and use_tools:
-        # For tool-based flow: launch RAG in background, await when code gen starts
         async def _fetch_rag():
             try:
                 t_rag = time.monotonic()
@@ -813,7 +741,6 @@ async def run_agent_stream(
                 return ""
         rag_task = asyncio.create_task(_fetch_rag())
     elif db:
-        # For direct generation (no tools): need RAG before building prompt
         try:
             t_rag = time.monotonic()
             is_jewelry = _detect_jewelry(user_input)
@@ -822,216 +749,182 @@ async def run_agent_stream(
         except Exception as e:
             logger.warning(f"[STREAM][RAG] Failed: {e}")
 
-    # Use AGENT_PROMPT for tool mode, CODE_PROMPT (+ domain + RAG) for direct generation
     experiment_meta = None
-    if use_tools:
-        if code_language == "cadquery":
-            from app.services.openscad_agent.prompts import AGENT_PROMPT_CADQUERY
-            system_prompt = AGENT_PROMPT_CADQUERY
-        else:
-            system_prompt = AGENT_PROMPT
-    else:
-        system_prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
-    messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]
-
-    # Mutable dict for code-gen calls to write experiment metadata into
     _exp_meta_out: dict = {}
 
-    full_text = ""
-    agent_text = ""  # Text from outer agent (shown in chat)
-    code_text = ""   # Code from dedicated code gen call
+    # ── Direct generation path (no tools): use structured output ──
+    if not use_tools:
+        if rag_task is not None and not rag_task.done():
+            rag_task.cancel()
 
-    for _iteration in range(settings.agent_max_iterations):
-        collected_response = None
-
-        if use_tools:
-            stream_source = c["llm_with_tools"].astream(messages)
-        elif image_data_urls:
-            stream_source = c["code_llm"].astream(messages)
-        else:
-            msgs, _direct_exp_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
-            if _direct_exp_meta:
-                _exp_meta_out.update(_direct_exp_meta)
-            stream_source = c["code_llm"].astream(msgs)
-
+        yield {"type": "tool", "tool_name": "build_parametric_model", "status": "generating"}
         try:
-            async for chunk in stream_source:
-                if use_tools:
-                    collected_response = chunk if collected_response is None else collected_response + chunk
-
-                token = _extract_text_content(chunk)
-                if token:
-                    full_text += token
-                    agent_text += token
-                    yield {"type": "token", "text": token}
+            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
+            structured_llm = _get_structured_llm(c)
+            gen_result = await structured_llm.ainvoke(msgs)
+            code_text = gen_result.code
+            parameters = [p.model_dump() for p in gen_result.parameters]
+            msg = gen_result.description
         except Exception as e:
-            logger.error(f"Streaming generation failed: {e}", exc_info=True)
-            yield {"type": "error", "message": str(e)}
-            return
+            logger.warning(f"[STREAM] Structured direct gen failed: {e}, falling back")
+            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
+            result = await c["code_llm"].ainvoke(msgs)
+            raw = _extract_text_content(result)
+            code_text = _strip_code_fences(raw)
+            if _looks_like_cadquery(code_text):
+                parameters = _extract_parameters_from_cadquery(code_text)
+            else:
+                parameters = _extract_parameters_from_code(code_text)
+            msg = "Model generated."
 
-        # Check for tool calls
-        if (
-            use_tools
-            and collected_response
-            and hasattr(collected_response, "tool_calls")
-            and collected_response.tool_calls
-        ):
-            for tool_call in collected_response.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
+        yield {"type": "tool", "tool_name": "build_parametric_model", "status": "completed"}
 
-                if tool_name == "build_parametric_model":
-                    # Await RAG if it was running in parallel
-                    if rag_task is not None:
-                        rag_context = await rag_task
-                        rag_task = None
-
-                    # CADAM pattern: separate code generation call with RAG context
-                    yield {"type": "tool", "tool_name": tool_name, "status": "generating"}
-
-                    try:
-                        code_tokens = []
-                        async for token in _generate_code_stream(tool_args, history, c, user_input, rag_context, _experiment_meta_out=_exp_meta_out, code_language=code_language):
-                            code_tokens.append(token)
-                            yield {"type": "token", "text": token}
-
-                        code_text = "".join(code_tokens)
-                        code_text = _strip_code_fences(code_text)
-                        full_text = code_text  # Code is the final output
-                        yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
-                    except Exception as e:
-                        logger.error(f"Code generation failed: {e}", exc_info=True)
-                        yield {"type": "tool", "tool_name": tool_name, "status": "error"}
-                        yield {"type": "error", "message": str(e)}
-                        return
-
-                elif tool_name == "apply_parameter_changes":
-                    yield {"type": "tool", "tool_name": tool_name, "status": "patching"}
-
-                    patched = _handle_parameter_changes(tool_args, history)
-                    if patched and (_looks_like_openscad(patched) or _looks_like_cadquery(patched)):
-                        code_text = patched
-                        full_text = patched
-                        yield {"type": "token", "text": patched}
-                        yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
-                    else:
-                        yield {"type": "tool", "tool_name": tool_name, "status": "error"}
-                        yield {"type": "token", "text": patched}
-                        full_text = patched
-
-                else:
-                    # Fallback: execute other tools normally (e.g. search_reference_images)
-                    tool_fn = _tools_by_name.get(tool_name)
-                    if tool_fn:
-                        try:
-                            tool_result = await tool_fn.ainvoke(tool_args)
-                        except Exception as e:
-                            tool_result = f"Tool error: {e}"
-                        logger.info(f"[STREAM] Tool {tool_name} returned: {str(tool_result)[:200]}")
-                        yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
-                        messages.append(collected_response)
-                        tool_id = tool_call.get("id", tool_name)
-
-                        # Extract embedded image data URLs for multimodal context
-                        tool_text = str(tool_result)
-                        img_match = re.search(r"\[IMAGE_DATA_URL\](.*?)\[/IMAGE_DATA_URL\]", tool_text, re.DOTALL)
-                        if img_match:
-                            clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL).strip()
-                            content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
-                            content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
-                            messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
-                        else:
-                            messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
-                        # Reset for next iteration — agent needs to see tool results
-                        # and decide next action (e.g. call build_parametric_model)
-                        collected_response = None
-                        agent_text = ""
-                        continue
-
-            # After passthrough tools, continue outer loop so agent can act on results
-            if collected_response is None:
-                continue
-            # Intercepted tools (build/patch) already produced final output — stop
-            break
-        else:
-            break
-
-    # Cancel RAG task if it's still running (wasn't needed)
-    if rag_task is not None and not rag_task.done():
-        rag_task.cancel()
-
-    # Fallback: if full_text contains code but wasn't extracted via tools
-    if not code_text and full_text:
-        if _looks_like_cadquery(full_text):
-            code_text = _strip_code_fences(full_text)
-            logger.info("Fallback: Detected CadQuery code in text response")
-        else:
-            extracted = _extract_openscad_from_text(full_text)
-            if extracted:
-                logger.info("Fallback: Extracted OpenSCAD code from text response")
-                code_text = extracted
-
-    logger.info(f"[STREAM] Complete, text_length={len(full_text)}, code_length={len(code_text)}")
-
-    # Merge experiment metadata from all sources
-    final_experiment_meta = experiment_meta or _exp_meta_out or None
-
-    # Build final response
-    if code_text:
-        is_cadquery_code = _looks_like_cadquery(code_text)
-
-        if is_cadquery_code:
-            # CadQuery: strip fences only, skip OpenSCAD cleaning/quality
-            code_text = _strip_code_fences(code_text)
-            quality_metrics = None
-            parameters = _extract_parameters_from_cadquery(code_text)
-        else:
+        quality_metrics = None
+        if code_text and not _looks_like_cadquery(code_text):
             from app.cadquery.tasks import _clean_scad
             code_text = _clean_scad(code_text)
             quality_metrics = _validate_code_quality(code_text)
 
-            # Self-correction: if severe issues found, ask LLM to fix (OpenSCAD only)
-            severe_issues = [i for i in quality_metrics.get("issues", [])
-                             if i in ("parts_mismatch", "uncalled_modules", "no_connections")]
-            if severe_issues and code_text:
-                logger.info(f"[QUALITY] Self-correcting: {severe_issues}")
-                fix_prompt = (
-                    f"Fix this OpenSCAD code. Issues found: {', '.join(severe_issues)}.\n"
-                    "Rules:\n"
-                    "- Every planned part MUST have a module AND be called in main()\n"
-                    "- All translate() values must use named connection variables, not magic numbers\n"
-                    "- Parts must physically overlap parents (use eps for boolean joins)\n"
-                    "- Arms hang DOWN from shoulders, legs extend DOWN from hips\n"
-                    "Return ONLY the fixed OpenSCAD code, no explanations.\n\n"
-                    f"{code_text}"
-                )
+        response = {
+            "openscad_code": code_text,
+            "parameters": parameters,
+            "model_type": "mechanical",
+            "message": msg,
+        }
+        if experiment_meta:
+            response["experiment"] = experiment_meta
+        if quality_metrics:
+            response["quality_metrics"] = quality_metrics
+
+        t_total = time.monotonic() - t_start
+        logger.info(f"[STREAM] Direct gen completed in {t_total:.2f}s — {len(code_text)} chars")
+        yield {"type": "done", "data": response}
+        return
+
+    # ── Tool-based agent path: stream outer agent, structured output for code gen ──
+    if code_language == "cadquery":
+        from app.services.openscad_agent.prompts import AGENT_PROMPT_CADQUERY
+        system_prompt = AGENT_PROMPT_CADQUERY
+    else:
+        system_prompt = AGENT_PROMPT
+    messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]
+
+    agent_text = ""
+    code_text = ""
+    parameters: list[dict] = []
+    gen_msg = ""
+
+    for _iteration in range(settings.agent_max_iterations):
+        collected_response = None
+
+        try:
+            async for chunk in c["llm_with_tools"].astream(messages):
+                collected_response = chunk if collected_response is None else collected_response + chunk
+                token = _extract_text_content(chunk)
+                if token:
+                    agent_text += token
+                    yield {"type": "token", "text": token}
+        except Exception as e:
+            logger.error(f"Streaming failed: {e}", exc_info=True)
+            yield {"type": "error", "message": str(e)}
+            return
+
+        # Check for tool calls
+        if not (collected_response and hasattr(collected_response, "tool_calls") and collected_response.tool_calls):
+            break
+
+        for tool_call in collected_response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+
+            if tool_name == "build_parametric_model":
+                # Await RAG if running in parallel
+                if rag_task is not None:
+                    rag_context = await rag_task
+                    rag_task = None
+
+                yield {"type": "tool", "tool_name": tool_name, "status": "generating"}
                 try:
-                    fix_messages = [SystemMessage(content="Fix the OpenSCAD code as instructed. Return ONLY code."),
-                                    HumanMessage(content=fix_prompt)]
-                    yield {"type": "tool", "tool_name": "quality_fix", "status": "fixing"}
-                    fixed_tokens = []
-                    async for chunk in c["code_llm"].astream(fix_messages):
-                        token = _extract_text_content(chunk)
-                        if token:
-                            fixed_tokens.append(token)
-                            yield {"type": "token", "text": token}
-                    fixed_code = _strip_code_fences("".join(fixed_tokens))
-                    if _score_openscad_code(fixed_code) >= 3:
-                        code_text = _clean_scad(fixed_code)
-                        quality_metrics = _validate_code_quality(code_text)
-                        logger.info(f"[QUALITY] After fix: {quality_metrics.get('status')} issues={quality_metrics.get('issues')}")
-                    yield {"type": "tool", "tool_name": "quality_fix", "status": "completed"}
+                    gen_result = await _generate_code(
+                        tool_args, history, c, user_input, rag_context,
+                        _experiment_meta_out=_exp_meta_out, code_language=code_language,
+                    )
+                    code_text = gen_result.code
+                    parameters = [p.model_dump() for p in gen_result.parameters]
+                    gen_msg = gen_result.description
+                    yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
                 except Exception as e:
-                    logger.warning(f"[QUALITY] Self-correction failed: {e}")
+                    logger.error(f"Code generation failed: {e}", exc_info=True)
+                    yield {"type": "tool", "tool_name": tool_name, "status": "error"}
+                    yield {"type": "error", "message": str(e)}
+                    return
 
-            parameters = _extract_parameters_from_code(code_text)
+            elif tool_name == "apply_parameter_changes":
+                yield {"type": "tool", "tool_name": tool_name, "status": "patching"}
+                patched = _handle_parameter_changes(tool_args, history)
+                if patched and (_looks_like_openscad(patched) or _looks_like_cadquery(patched)):
+                    code_text = patched
+                    if _looks_like_cadquery(patched):
+                        parameters = _extract_parameters_from_cadquery(patched)
+                    else:
+                        parameters = _extract_parameters_from_code(patched)
+                    gen_msg = "Parameters updated."
+                    yield {"type": "token", "text": patched}
+                    yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
+                else:
+                    yield {"type": "tool", "tool_name": tool_name, "status": "error"}
+                    yield {"type": "token", "text": patched}
 
-        # Strip code blocks from agent text to get clean conversational message
-        msg = re.sub(r'```[\s\S]*?```', '', agent_text).strip()
-        if not msg:
-            msg = "Model generated."
+            else:
+                # Execute other tools (e.g. search_reference_images)
+                tool_fn = _tools_by_name.get(tool_name)
+                if tool_fn:
+                    try:
+                        tool_result = await tool_fn.ainvoke(tool_args)
+                    except Exception as e:
+                        tool_result = f"Tool error: {e}"
+                    logger.info(f"[STREAM] Tool {tool_name} returned: {str(tool_result)[:200]}")
+                    yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
+                    messages.append(collected_response)
+                    tool_id = tool_call.get("id", tool_name)
+
+                    tool_text = str(tool_result)
+                    img_match = re.search(r"\[IMAGE_DATA_URL\](.*?)\[/IMAGE_DATA_URL\]", tool_text, re.DOTALL)
+                    if img_match:
+                        clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL).strip()
+                        content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
+                        content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
+                        messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
+                    else:
+                        messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
+                    collected_response = None
+                    agent_text = ""
+                    continue
+
+        # After passthrough tools, continue so agent can act on results
+        if collected_response is None:
+            continue
+        break
+
+    # Cancel RAG task if still running
+    if rag_task is not None and not rag_task.done():
+        rag_task.cancel()
+
+    # Merge experiment metadata
+    final_experiment_meta = experiment_meta or _exp_meta_out or None
+
+    # Build final response
+    quality_metrics = None
+    if code_text:
+        if not _looks_like_cadquery(code_text):
+            from app.cadquery.tasks import _clean_scad
+            code_text = _clean_scad(code_text)
+            quality_metrics = _validate_code_quality(code_text)
+
+        msg = gen_msg or re.sub(r'```[\s\S]*?```', '', agent_text).strip() or "Model generated."
         if len(msg) > 500:
             msg = msg[:500]
+
         response = {
             "openscad_code": code_text,
             "parameters": parameters,
@@ -1039,17 +932,22 @@ async def run_agent_stream(
             "message": msg,
         }
     else:
-        response = _extract_from_text(full_text)
-        quality_metrics = None
-        if response.get("openscad_code") and not _looks_like_cadquery(response["openscad_code"]):
-            quality_metrics = _validate_code_quality(response["openscad_code"])
+        # No code generated — pure chat response
+        msg = agent_text.strip() or "Here to help!"
+        if len(msg) > 500:
+            msg = msg[:500]
+        response = {
+            "openscad_code": "",
+            "parameters": [],
+            "model_type": "chat",
+            "message": msg,
+        }
 
-    # Attach experiment + quality data to response for persistence
     if final_experiment_meta:
         response["experiment"] = final_experiment_meta
     if quality_metrics:
         response["quality_metrics"] = quality_metrics
 
     t_total = time.monotonic() - t_start
-    logger.info(f"[STREAM] Completed in {t_total:.2f}s — {len(full_text)} chars generated")
+    logger.info(f"[STREAM] Completed in {t_total:.2f}s — code={len(code_text)} chars")
     yield {"type": "done", "data": response}
