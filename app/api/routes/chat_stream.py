@@ -768,6 +768,7 @@ async def _handle_openscad_ws(
     content = payload.get("content", "")
     images = payload.get("images")  # list of {data, media_type}
     options = payload.get("options", {})
+    logger.info(f"[WS] code_language={options.get('code_language', 'openscad')}")
 
     try:
         async with SessionLocal() as db:

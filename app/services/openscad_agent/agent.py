@@ -303,7 +303,12 @@ async def _run_tool_loop(
     llm = components["llm"]
 
     human_msg = _build_human_message(user_input, image_data_urls)
-    messages = [SystemMessage(content=AGENT_PROMPT)] + list(history) + [human_msg]
+    if code_language == "cadquery":
+        from app.services.openscad_agent.prompts import AGENT_PROMPT_CADQUERY
+        agent_prompt = AGENT_PROMPT_CADQUERY
+    else:
+        agent_prompt = AGENT_PROMPT
+    messages = [SystemMessage(content=agent_prompt)] + list(history) + [human_msg]
 
     for _ in range(max_iterations):
         response = await llm_with_tools.ainvoke(messages)
@@ -820,7 +825,11 @@ async def run_agent_stream(
     # Use AGENT_PROMPT for tool mode, CODE_PROMPT (+ domain + RAG) for direct generation
     experiment_meta = None
     if use_tools:
-        system_prompt = AGENT_PROMPT
+        if code_language == "cadquery":
+            from app.services.openscad_agent.prompts import AGENT_PROMPT_CADQUERY
+            system_prompt = AGENT_PROMPT_CADQUERY
+        else:
+            system_prompt = AGENT_PROMPT
     else:
         system_prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
     messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]

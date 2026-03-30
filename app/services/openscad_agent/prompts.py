@@ -6,6 +6,13 @@ Use apply_parameter_changes for simple numeric tweaks (e.g., "make it taller").
 Use search_reference_images when the user asks for something you need visual reference for — anime/manga items, specific real-world objects, branded products, characters, weapons, etc. Search first, then build.
 When modifying, preserve all existing modules and variables."""
 
+AGENT_PROMPT_CADQUERY = """You are a CAD assistant that helps users design and modify 3D models using CadQuery (Python). Chat naturally — briefly describe what you'll build before generating.
+
+Use build_parametric_model for new objects or structural changes — pass the user's request directly.
+Use apply_parameter_changes for simple numeric tweaks (e.g., "make it taller").
+Use search_reference_images when the user asks for something you need visual reference for — anime/manga items, specific real-world objects, branded products, characters, weapons, etc. Search first, then build.
+When modifying, preserve all existing modules and variables."""
+
 # Code generation prompt (dedicated LLM call)
 CODE_PROMPT = """You are an expert CAD assistant specializing in OpenSCAD.
 
