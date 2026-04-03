@@ -15,6 +15,23 @@ class RunpodClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_token}"}
 
+    async def start_raw_job(
+        self,
+        input_payload: dict[str, Any],
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        """Submit an arbitrary input payload to the RunPod endpoint."""
+        payload: dict[str, Any] = {"input": input_payload}
+        endpoint = "runsync" if sync else "run"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self._base_url}/{endpoint}",
+                json=payload,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
     async def start_job(
         self,
         action: str,
@@ -55,3 +72,11 @@ def get_runpod_client() -> RunpodClient:
     if not settings.runpod_api_token:
         raise ValueError("RUNPOD_API_TOKEN is not configured")
     return RunpodClient(settings.runpod_base_url, settings.runpod_api_token)
+
+
+def get_image_to_3d_client() -> RunpodClient:
+    base_url = settings.image_to_3d_runpod_base_url or settings.runpod_base_url
+    token = settings.image_to_3d_runpod_api_token or settings.runpod_api_token
+    if not token:
+        raise ValueError("No API token configured for image-to-3D RunPod endpoint")
+    return RunpodClient(base_url, token)

@@ -21,3 +21,15 @@ class ChatRunpodResponse(BaseModel):
     status: str
     runpod_id: str | None = None
     message_id: str
+
+
+class ImageTo3DRequest(BaseModel):
+    image_url: str  # Base64 data URL or HTTPS URL
+    prompt: str = ""
+    output_format: Literal["glb", "stl"] = "glb"
+
+
+class ImageTo3DResponse(BaseModel):
+    status: str
+    runpod_id: str | None = None
+    message_id: str

@@ -17,8 +17,10 @@ from app.services.openscad_agent.tools import (
     apply_parameter_changes,
     build_parametric_model,
     search_reference_images,
+    generate_3d_from_image,
 )
 from app.services.openscad_agent.tools.parameter_patcher import patch_code
+from app.services.openscad_agent.tools.image_search import _fetch_ddg_images, _download_thumbnail
 from app.schemas.openscad import OpenSCADResponse, OpenSCADParameter
 from app.core.config import settings
 
@@ -43,7 +45,7 @@ def _detect_jewelry(text: str) -> bool:
 
 
 # Tools available to the agent
-_tools = [apply_parameter_changes, build_parametric_model, search_reference_images]
+_tools = [apply_parameter_changes, build_parametric_model, search_reference_images, generate_3d_from_image]
 _tools_by_name = {t.name: t for t in _tools}
 
 
@@ -165,10 +167,12 @@ def _build_direct_generation_messages(
     history: list[HumanMessage | AIMessage],
     rag_context: str = "",
     code_language: str = "openscad",
+    image_data_urls: list[str] | None = None,
 ) -> tuple[list, dict | None]:
     """Build messages for direct code generation (no tools, uses CODE_PROMPT)."""
     prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
-    return [SystemMessage(content=prompt)] + list(history) + [HumanMessage(content=user_input)], experiment_meta
+    human_msg = _build_human_message(user_input, image_data_urls)
+    return [SystemMessage(content=prompt)] + list(history) + [human_msg], experiment_meta
 
 
 def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> str:
@@ -322,7 +326,36 @@ async def _run_tool_loop(
             tool_args = tool_call["args"]
             tool_id = tool_call.get("id", tool_name)
 
-            if tool_name == "build_parametric_model":
+            if tool_name == "generate_3d_from_image":
+                image_query = tool_args.get("image_query", "")
+                prompt = tool_args.get("prompt", "")
+                # Search for a reference image
+                image_url = None
+                results = _fetch_ddg_images(f"{image_query} 3D reference", max_results=3)
+                for r in results:
+                    thumb = r.get("thumbnail")
+                    if thumb:
+                        data_url = _download_thumbnail(thumb)
+                        if data_url:
+                            image_url = data_url
+                            break
+                    img_url = r.get("image")
+                    if img_url:
+                        image_url = img_url
+                        break
+                return {
+                    "openscad_code": "",
+                    "parameters": [],
+                    "model_type": "image_to_3d",
+                    "message": f"Generating 3D model from image for: {image_query}",
+                    "image_to_3d": {
+                        "image_url": image_url,
+                        "image_query": image_query,
+                        "prompt": prompt,
+                    },
+                }
+
+            elif tool_name == "build_parametric_model":
                 gen_result = await _generate_code(tool_args, history, components, user_input, rag_context, code_language=code_language)
                 logger.info(f"Code generation returned {len(gen_result.code)} chars, {len(gen_result.parameters)} params")
                 return {
@@ -759,7 +792,7 @@ async def run_agent_stream(
 
         yield {"type": "tool", "tool_name": "build_parametric_model", "status": "generating"}
         try:
-            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
+            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language, image_data_urls)
             structured_llm = _get_structured_llm(c)
             gen_result = await structured_llm.ainvoke(msgs)
             code_text = gen_result.code
@@ -767,7 +800,7 @@ async def run_agent_stream(
             msg = gen_result.description
         except Exception as e:
             logger.warning(f"[STREAM] Structured direct gen failed: {e}, falling back")
-            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language)
+            msgs, experiment_meta = _build_direct_generation_messages(user_input, history, rag_context, code_language, image_data_urls)
             result = await c["code_llm"].ainvoke(msgs)
             raw = _extract_text_content(result)
             code_text = _strip_code_fences(raw)
@@ -837,7 +870,52 @@ async def run_agent_stream(
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
-            if tool_name == "build_parametric_model":
+            if tool_name == "generate_3d_from_image":
+                image_query = tool_args.get("image_query", "")
+                prompt = tool_args.get("prompt", "")
+                yield {"type": "tool", "tool_name": tool_name, "status": "searching"}
+                # Search for a reference image
+                image_url = None
+                results = _fetch_ddg_images(f"{image_query} 3D reference", max_results=3)
+                for r in results:
+                    thumb = r.get("thumbnail")
+                    if thumb:
+                        data_url = _download_thumbnail(thumb)
+                        if data_url:
+                            image_url = data_url
+                            break
+                    img_url = r.get("image")
+                    if img_url:
+                        image_url = img_url
+                        break
+                yield {"type": "tool", "tool_name": tool_name, "status": "completed"}
+                # Yield a special event for the WS handler to pick up
+                yield {
+                    "type": "image_to_3d.trigger",
+                    "data": {
+                        "image_url": image_url,
+                        "image_query": image_query,
+                        "prompt": prompt,
+                    },
+                }
+                # Also yield done with marker so WS handler knows
+                yield {
+                    "type": "done",
+                    "data": {
+                        "openscad_code": "",
+                        "parameters": [],
+                        "model_type": "image_to_3d",
+                        "message": f"Generating 3D model from image for: {image_query}",
+                        "image_to_3d": {
+                            "image_url": image_url,
+                            "image_query": image_query,
+                            "prompt": prompt,
+                        },
+                    },
+                }
+                return
+
+            elif tool_name == "build_parametric_model":
                 # Await RAG if running in parallel
                 if rag_task is not None:
                     rag_context = await rag_task

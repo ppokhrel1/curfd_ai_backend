@@ -9,6 +9,7 @@ from typing import Any, TypedDict
 import zipfile
 
 import aiohttp
+import httpx
 from fastapi import (
     APIRouter,
     Depends,
@@ -32,9 +33,9 @@ from app.models.message import Message as MessageModel
 from app.models.session import Session as SessionModel
 from app.schemas.asset import AssetRead
 from app.schemas.message import MessageRead
-from app.schemas.runpod import ChatRunpodRequest, ChatRunpodResponse
+from app.schemas.runpod import ChatRunpodRequest, ChatRunpodResponse, ImageTo3DRequest, ImageTo3DResponse
 from app.services.chat_socket import chat_socket_manager
-from app.services.runpod import get_runpod_client
+from app.services.runpod import get_runpod_client, get_image_to_3d_client
 from app.services.openscad_agent import run_agent_stream
 from app.api.routes.gemini_openscad_generate_route import (
     _build_lc_history,
@@ -299,6 +300,336 @@ async def _persist_generate_scad_asset(
 
     return _serialize_asset(asset)
 
+async def _persist_image_to_3d_asset(
+    *,
+    db: AsyncSession,
+    chat_id: str,
+    output: Any,
+    runpod_id: str | None,
+) -> dict[str, Any] | None:
+    """Persist a generated 3D model (GLB/STL) from the image-to-3D RunPod worker."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if not isinstance(output, dict):
+        logger.error(f"Image-to-3D output is not a dict: {type(output)}")
+        return None
+
+    # Handle nested output formats
+    data = output
+    if "output" in output and isinstance(output["output"], dict):
+        data = output["output"]
+
+    model_url = data.get("model_url") or data.get("download_url")
+    if not model_url:
+        logger.error(f"No model_url in image-to-3D output. Keys: {data.keys()}")
+        return None
+
+    chat = await db.get(ChatModel, chat_id)
+    if not chat:
+        return None
+    current_session_id = chat.session_id
+
+    job = JobModel(
+        session_id=current_session_id,
+        status="succeeded",
+        prompt="Image-to-3D generation",
+        output_format="glb",
+        started_at=datetime.now(timezone.utc),
+        finished_at=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    # Create parent asset
+    asset = AssetModel(
+        job_id=job.id,
+        asset_type="image_to_3d_glb",
+        uri=model_url,
+        storage_provider="runpod",
+        metadata_json={
+            "runpod_id": runpod_id,
+            "model_url": model_url,
+        },
+    )
+    db.add(asset)
+
+    # Create child assets for parts if available
+    parts = data.get("parts", [])
+    for part in parts:
+        part_name = part.get("name", "part")
+        part_url = part.get("mesh_url") or part.get("url")
+        if part_url:
+            part_asset = AssetModel(
+                job_id=job.id,
+                asset_type="image_to_3d_part",
+                uri=part_url,
+                storage_provider="runpod",
+                metadata_json={
+                    "part_name": part_name,
+                    "parent_runpod_id": runpod_id,
+                },
+            )
+            db.add(part_asset)
+
+    await db.commit()
+    await db.refresh(asset)
+
+    uploaded_by = await db.scalar(
+        select(SessionModel.user_id).where(SessionModel.id == current_session_id)
+    )
+    meta = AssetMetaModel(
+        asset_id=asset.id,
+        part_name="image_to_3d_model",
+        uploaded_by=uploaded_by,
+    )
+    db.add(meta)
+    await db.commit()
+    await db.refresh(asset)
+
+    return _serialize_asset(asset)
+
+
+import re as _re
+
+_STRIP_PREFIXES = _re.compile(
+    r"^(generate\s+(a\s+)?(3d\s+model|an?\s+image|mesh|shape)\s*(of|for|:)?\s*"
+    r"|create\s+(a\s+)?(3d\s+model|an?\s+image|mesh|shape)\s*(of|for|:)?\s*"
+    r"|make\s+(a\s+)?(3d\s+model|an?\s+image|mesh|shape)\s*(of|for|:)?\s*"
+    r"|build\s+(a\s+)?(3d\s+model|mesh|shape)\s*(of|for|:)?\s*)",
+    _re.IGNORECASE,
+)
+
+
+def _clean_search_query(raw: str) -> str:
+    """Strip action prefixes to get the core subject for image search."""
+    cleaned = _STRIP_PREFIXES.sub("", raw).strip()
+    return cleaned or raw.strip()
+
+
+def _search_images_sync(query: str) -> list[dict]:
+    """Search for images via Brave Search (server-rendered, no API key, no rate limits)."""
+    import logging
+    import re
+    import httpx as _httpx
+
+    logger = logging.getLogger(__name__)
+
+    url = f"https://search.brave.com/images?q={query}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+    }
+
+    try:
+        resp = _httpx.get(url, headers=headers, timeout=10.0, follow_redirects=True)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning(f"Brave image search request failed: {e}")
+        return []
+
+    # Brave renders image URLs server-side in the HTML
+    img_urls = re.findall(
+        r'https?://[^"\s<>]+\.(?:jpg|jpeg|png|webp)',
+        resp.text,
+    )
+
+    # Skip stock photo sites (they block direct downloads) and brave assets
+    skip = (
+        "brave.com", "imgs.search.brave", "favicon",
+        "istockphoto.com", "shutterstock.com", "gettyimages.com",
+        "adobestock.com", "123rf.com", "depositphotos.com",
+        "alamy.com", "dreamstime.com", "stock.adobe.com",
+    )
+    seen: set[str] = set()
+    results = []
+    for img_url in img_urls:
+        if any(s in img_url for s in skip):
+            continue
+        if img_url in seen:
+            continue
+        seen.add(img_url)
+        results.append({"image": img_url, "title": query})
+        if len(results) >= 8:
+            break
+
+    if results:
+        logger.info(f"Brave Search returned {len(results)} image results for '{query}'")
+    else:
+        logger.warning(f"Brave Search found no images for '{query}'")
+
+    return results
+
+
+async def _extract_search_keywords(user_message: str) -> str:
+    """Use a fast LLM (no thinking) to convert user message into optimal image search keywords."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from app.services.openscad_agent.llm_provider import get_llm
+
+        llm = get_llm(provider="groq", model="llama-3.3-70b-versatile", thinking=False, temperature_override=0.0, max_tokens_override=50)
+        result = await llm.ainvoke([
+            SystemMessage(content=(
+                "Extract the subject from the user's request and append '3D model'. "
+                "Reply with ONLY the search query. 3-5 words max.\n"
+                "Examples: 'make a sports car' → 'sports car 3D model' | "
+                "'nepali temple pashupatinath' → 'pashupatinath temple 3D model' | "
+                "'gold ring with emerald' → 'emerald gold ring 3D model' | "
+                "'dragon' → 'dragon 3D model'"
+            )),
+            HumanMessage(content=user_message),
+        ])
+        keywords = result.content.strip().strip('"').strip("'")
+        if keywords:
+            logger.info(f"LLM search keywords: '{user_message}' → '{keywords}'")
+            return keywords
+    except Exception as e:
+        logger.warning(f"LLM keyword extraction failed: {e}")
+
+    # Fallback to regex cleanup
+    return _clean_search_query(user_message)
+
+
+async def _resolve_search_image(query: str) -> str | None:
+    """Use LLM to extract keywords, search Brave for images, download as base64."""
+    import logging
+    import base64
+
+    logger = logging.getLogger(__name__)
+
+    # Step 1: LLM extracts optimal search keywords
+    search_query = await _extract_search_keywords(query)
+    logger.info(f"Search query: '{query}' → '{search_query}'")
+
+    # Step 2: Search Brave for images
+    try:
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, _search_images_sync, search_query)
+    except Exception as e:
+        logger.warning(f"Image search failed for '{search_query}': {e}")
+        return None
+
+    if not results:
+        logger.warning(f"No image results for '{search_query}'")
+        return None
+
+    logger.info(f"Found {len(results)} image results for '{search_query}'")
+
+    # Step 3: Download first usable image
+    for r in results:
+        url = r.get("image") or r.get("thumbnail")
+        if not url:
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
+                resp = await http.get(url)
+                resp.raise_for_status()
+                ct = resp.headers.get("content-type", "image/jpeg")
+                if "image" not in ct:
+                    continue
+                if len(resp.content) > 5 * 1024 * 1024:
+                    continue
+                b64 = base64.b64encode(resp.content).decode("utf-8")
+                media_type = ct.split(";")[0].strip()
+                logger.info(f"Resolved '{search_query}' → {url} ({len(resp.content)} bytes)")
+                return f"data:{media_type};base64,{b64}"
+        except Exception as e:
+            logger.debug(f"Failed to download {url}: {e}")
+            continue
+
+    logger.warning(f"All image downloads failed for '{search_query}'")
+    return None
+
+
+async def _handle_image_to_3d_request(
+    *,
+    chat_id: str,
+    payload: ImageTo3DRequest,
+    db: AsyncSession,
+) -> ImageTo3DResponse:
+    """Submit an image-to-3D job to RunPod and start polling."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    resolved_image_url = payload.image_url
+
+    # No image provided but prompt exists — search for a reference image
+    if not resolved_image_url and payload.prompt:
+        logger.info(f"No image provided, searching for: {payload.prompt}")
+        found_url = await _resolve_search_image(payload.prompt)
+        if found_url:
+            resolved_image_url = found_url
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not find a reference image for '{payload.prompt}'. Try uploading an image instead.",
+            )
+
+    # Save user message
+    user_message = MessageModel(
+        chat_id=chat_id,
+        role="user",
+        content=f"Generate 3D model: {payload.prompt or 'from image'}",
+        metadata_json={
+            "action": "image_to_3d",
+            "has_image": bool(resolved_image_url),
+            "output_format": payload.output_format,
+        },
+    )
+    db.add(user_message)
+    await db.commit()
+    await db.refresh(user_message)
+
+    try:
+        client = get_image_to_3d_client()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    try:
+        runpod_response = await client.start_raw_job({
+            "action": "image_to_3d",
+            "image_url": resolved_image_url,
+            "prompt": payload.prompt,
+            "output_format": payload.output_format,
+        })
+        logger.info(f"Image-to-3D RunPod job submitted: {runpod_response.get('id')}")
+    except Exception as exc:
+        logger.exception(f"Image-to-3D RunPod request failed: {exc}")
+        raise HTTPException(
+            status_code=502, detail=f"Image-to-3D request failed: {exc}"
+        ) from exc
+
+    runpod_id = runpod_response.get("id")
+    if not runpod_id:
+        raise HTTPException(status_code=502, detail="RunPod did not return a job id")
+
+    asyncio.create_task(
+        _runpod_poll_and_emit(
+            chat_id=chat_id,
+            runpod_id=runpod_id,
+            action="image_to_3d",
+            status_timeout_seconds=settings.image_to_3d_timeout_seconds,
+        )
+    )
+
+    return ImageTo3DResponse(
+        status="queued",
+        runpod_id=runpod_id,
+        message_id=str(user_message.id),
+    )
+
+
 async def _handle_runpod_request(
     *,
     chat_id: str,
@@ -486,9 +817,15 @@ async def _runpod_poll_and_emit(
     asset_context: AssetContext | None = None,
     request_context: RequestContext | None = None,
     status_timeout_seconds: int | float | str | None = None,
+    runpod_client=None,
 ) -> None:
     try:
-        client = get_runpod_client()
+        if runpod_client is not None:
+            client = runpod_client
+        elif action == "image_to_3d":
+            client = get_image_to_3d_client()
+        else:
+            client = get_runpod_client()
     except ValueError as exc:
         await chat_socket_manager.send_to_chat(
             chat_id,
@@ -627,6 +964,27 @@ async def _runpod_poll_and_emit(
                         }
                     if asset_output is not None:
                         output = asset_output
+                elif action == "image_to_3d":
+                    logger.info("Attempting to persist image_to_3d asset")
+                    try:
+                        asset_output = await _persist_image_to_3d_asset(
+                            db=db,
+                            chat_id=chat_id,
+                            output=output,
+                            runpod_id=runpod_id,
+                        )
+                        if asset_output is None:
+                            logger.error("_persist_image_to_3d_asset returned None")
+                        else:
+                            logger.info(f"Image-to-3D asset persisted: {asset_output}")
+                    except Exception as exc:
+                        logger.exception(f"Image-to-3D asset persistence failed: {exc}")
+                        asset_output = {
+                            "error": f"asset persistence failed: {exc}",
+                            "output": output,
+                        }
+                    if asset_output is not None:
+                        output = asset_output
                 else:
                     logger.info(f"Action is '{action}', not persisting asset")
 
@@ -755,6 +1113,32 @@ async def runpod_chat(
     return await _handle_runpod_request(chat_id=chat_id, payload=payload, db=db)
 
 
+@router.post(
+    "/chats/{chat_id}/image-to-3d",
+    response_model=ImageTo3DResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def image_to_3d_chat(
+    chat_id: str,
+    payload: ImageTo3DRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    row = (
+        await db.execute(
+            select(ChatModel, SessionModel.user_id)
+            .join(SessionModel, ChatModel.session_id == SessionModel.id)
+            .where(ChatModel.id == chat_id)
+        )
+    ).one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    _, owner_id = row
+    if owner_id and owner_id != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return await _handle_image_to_3d_request(chat_id=chat_id, payload=payload, db=db)
+
+
 async def _handle_openscad_ws(
     websocket: WebSocket,
     chat_id: str,
@@ -824,6 +1208,42 @@ async def _handle_openscad_ws(
                         "tool_name": event["tool_name"],
                         "status": event["status"],
                     })
+                elif event["type"] == "image_to_3d.trigger":
+                    # Agent wants to generate 3D from image — submit RunPod job
+                    trigger_data = event["data"]
+                    image_url = trigger_data.get("image_url")
+                    if image_url:
+                        try:
+                            i3d_client = get_image_to_3d_client()
+                            i3d_response = await i3d_client.start_raw_job({
+                                "action": "image_to_3d",
+                                "image_url": image_url,
+                                "prompt": trigger_data.get("prompt", ""),
+                                "output_format": "glb",
+                            })
+                            i3d_runpod_id = i3d_response.get("id")
+                            if i3d_runpod_id:
+                                asyncio.create_task(
+                                    _runpod_poll_and_emit(
+                                        chat_id=chat_id,
+                                        runpod_id=i3d_runpod_id,
+                                        action="image_to_3d",
+                                        status_timeout_seconds=settings.image_to_3d_timeout_seconds,
+                                    )
+                                )
+                                await websocket.send_json({
+                                    "type": "image_to_3d.started",
+                                    "chat_id": chat_id,
+                                    "runpod_id": i3d_runpod_id,
+                                    "image_query": trigger_data.get("image_query", ""),
+                                })
+                        except Exception as e:
+                            logger.error(f"Image-to-3D trigger failed: {e}")
+                            await websocket.send_json({
+                                "type": "image_to_3d.error",
+                                "chat_id": chat_id,
+                                "message": str(e),
+                            })
                 elif event["type"] == "done":
                     final_data = event["data"]
                 elif event["type"] == "error":
@@ -959,6 +1379,33 @@ async def chat_socket(
             # Handle OpenSCAD generation requests
             if msg_type == "openscad.request":
                 asyncio.create_task(_handle_openscad_ws(websocket, chat_id, payload))
+                continue
+
+            # Handle image-to-3D requests
+            if msg_type == "image_to_3d.request":
+                try:
+                    i3d_payload = ImageTo3DRequest.model_validate(payload.get("payload", {}))
+                    async with SessionLocal() as db:
+                        response = await _handle_image_to_3d_request(
+                            chat_id=chat_id,
+                            payload=i3d_payload,
+                            db=db,
+                        )
+                    await websocket.send_json({
+                        "type": "image_to_3d.queued",
+                        "chat_id": chat_id,
+                        "runpod_id": response.runpod_id,
+                        "message_id": response.message_id,
+                        "status": response.status,
+                    })
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).error(f"Image-to-3D WS error: {e}")
+                    await websocket.send_json({
+                        "type": "image_to_3d.error",
+                        "chat_id": chat_id,
+                        "message": str(e),
+                    })
                 continue
 
             # Handle RunPod requests

@@ -19,6 +19,7 @@ from app.api.routes import (
     cadquery,
     gemini_openscad_generate_route,
     openscad,
+    storage_proxy,
     uploads,
 )
 
@@ -43,4 +44,5 @@ api_router.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
 api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
 api_router.include_router(experiments.router, prefix="/experiments", tags=["experiments"])
 api_router.include_router(init.router, prefix="/init", tags=["init"])
+api_router.include_router(storage_proxy.router, prefix="/storage", tags=["storage-proxy"])
 

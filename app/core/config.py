@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     runpod_status_poll_interval_seconds: float = 2.5
     runpod_status_timeout_seconds: int = 7200
 
+    # Image-to-3D RunPod endpoint (model-agnostic: Hunyuan3D, Trellis, InstantMesh, etc.)
+    image_to_3d_runpod_base_url: str | None = None  # Falls back to runpod_base_url
+    image_to_3d_runpod_api_token: str | None = None  # Falls back to runpod_api_token
+    image_to_3d_timeout_seconds: int = 600
+
 
 settings = Settings()
 
