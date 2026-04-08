@@ -480,12 +480,15 @@ async def _extract_search_keywords(user_message: str) -> str:
         llm = get_llm(provider="groq", model="llama-3.3-70b-versatile", thinking=False, temperature_override=0.0, max_tokens_override=50)
         result = await llm.ainvoke([
             SystemMessage(content=(
-                "Extract the subject from the user's request and append '3D model'. "
-                "Reply with ONLY the search query. 3-5 words max.\n"
-                "Examples: 'make a sports car' → 'sports car 3D model' | "
-                "'nepali temple pashupatinath' → 'pashupatinath temple 3D model' | "
-                "'gold ring with emerald' → 'emerald gold ring 3D model' | "
-                "'dragon' → 'dragon 3D model'"
+                "Extract the subject from the user's request and build an image search query "
+                "that finds a SINGLE isolated object photo (one item, plain background, no hands/people/extras).\n"
+                "Always append qualifiers like 'product photo white background' or '3D render isolated'.\n"
+                "Reply with ONLY the search query. 5-7 words max.\n"
+                "Examples:\n"
+                "'make a sports car' → 'sports car product photo white background'\n"
+                "'nepali temple pashupatinath' → 'pashupatinath temple 3D render isolated'\n"
+                "'gold ring with emerald' → 'emerald gold ring product photo white background'\n"
+                "'dragon' → 'dragon figurine isolated white background'"
             )),
             HumanMessage(content=user_message),
         ])
