@@ -613,21 +613,24 @@ async def run_agent(
     c = _get_components(provider, model, thinking)
     logger.info(f"[AGENT] Starting request: provider={c['provider']}, model={model}, thinking={thinking}, code_language={code_language}")
 
-    # Start RAG fetch in parallel with agent work
+    # Start RAG fetch in parallel with agent work — use own session to avoid concurrent op errors
     rag_context = ""
     rag_task: asyncio.Task | None = None
-    if db:
-        async def _fetch_rag():
-            try:
-                t_rag = time.monotonic()
-                is_jewelry = _detect_jewelry(user_input)
-                ctx = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry, code_language=code_language)
-                logger.info(f"[AGENT][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
-                return ctx
-            except Exception as e:
-                logger.warning(f"[AGENT][RAG] Failed to fetch examples: {e}")
-                return ""
-        rag_task = asyncio.create_task(_fetch_rag())
+
+    async def _fetch_rag_own_session():
+        from app.db.session import SessionLocal
+        try:
+            t_rag = time.monotonic()
+            is_jewelry = _detect_jewelry(user_input)
+            async with SessionLocal() as rag_db:
+                ctx = await get_examples_for_prompt(rag_db, user_input, is_jewelry=is_jewelry, code_language=code_language)
+            logger.info(f"[AGENT][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
+            return ctx
+        except Exception as e:
+            logger.warning(f"[AGENT][RAG] Failed to fetch examples: {e}")
+            return ""
+
+    rag_task = asyncio.create_task(_fetch_rag_own_session())
 
     # Await RAG before code generation
     if rag_task is not None:
@@ -759,28 +762,28 @@ async def run_agent_stream(
     )
 
     # Start RAG fetch in parallel with agent routing
+    # Always open a fresh DB session — sharing the caller's session causes asyncpg
+    # "operation in progress" errors when concurrent ops hit the same connection.
     rag_context = ""
     rag_task: asyncio.Task | None = None
-    if db and use_tools:
-        async def _fetch_rag():
-            try:
-                t_rag = time.monotonic()
-                is_jewelry = _detect_jewelry(user_input)
-                ctx = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry)
-                logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
-                return ctx
-            except Exception as e:
-                logger.warning(f"[STREAM][RAG] Failed: {e}")
-                return ""
-        rag_task = asyncio.create_task(_fetch_rag())
-    elif db:
+
+    async def _fetch_rag_with_own_session():
+        from app.db.session import SessionLocal
         try:
             t_rag = time.monotonic()
             is_jewelry = _detect_jewelry(user_input)
-            rag_context = await get_examples_for_prompt(db, user_input, is_jewelry=is_jewelry, code_language=code_language)
-            logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(rag_context)} chars, jewelry={is_jewelry}")
+            async with SessionLocal() as rag_db:
+                ctx = await get_examples_for_prompt(rag_db, user_input, is_jewelry=is_jewelry, code_language=code_language)
+            logger.info(f"[STREAM][RAG] {time.monotonic() - t_rag:.2f}s — {len(ctx)} chars, jewelry={is_jewelry}")
+            return ctx
         except Exception as e:
             logger.warning(f"[STREAM][RAG] Failed: {e}")
+            return ""
+
+    if use_tools:
+        rag_task = asyncio.create_task(_fetch_rag_with_own_session())
+    else:
+        rag_context = await _fetch_rag_with_own_session()
 
     experiment_meta = None
     _exp_meta_out: dict = {}

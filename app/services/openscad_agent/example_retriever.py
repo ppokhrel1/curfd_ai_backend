@@ -22,8 +22,8 @@ from app.models.openscad_example import OpenscadExample
 logger = logging.getLogger(__name__)
 
 MAX_EXAMPLES = 1
-MAX_EXAMPLES_JEWELRY = 2
-MAX_CODE_LENGTH = 2500
+MAX_EXAMPLES_JEWELRY = 1  # Was 2 — Groq free tier has 12K TPM limit
+MAX_CODE_LENGTH = 1000
 STORAGE_BUCKET = "openscad-examples"
 EMBEDDING_MODEL = "gemini-embedding-001"
 SIMILARITY_THRESHOLD = 0.72  # Minimum cosine similarity to consider a match

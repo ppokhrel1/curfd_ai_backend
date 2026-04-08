@@ -309,7 +309,6 @@ async def _persist_image_to_3d_asset(
 ) -> dict[str, Any] | None:
     """Persist a generated 3D model (GLB/STL) from the image-to-3D RunPod worker."""
     import logging
-    import hashlib
 
     logger = logging.getLogger(__name__)
 
@@ -332,31 +331,10 @@ async def _persist_image_to_3d_asset(
         return None
     current_session_id = chat.session_id
 
-    # Find the prompt from the most recent user message in this chat for cache key
-    prompt = data.get("prompt", "")
-    if not prompt:
-        try:
-            user_msg_result = await db.execute(
-                select(MessageModel)
-                .where(MessageModel.chat_id == chat_id)
-                .where(MessageModel.role == "user")
-                .order_by(MessageModel.created_at.desc())
-                .limit(1)
-            )
-            user_msg = user_msg_result.scalar_one_or_none()
-            if user_msg and user_msg.metadata_json:
-                prompt = user_msg.metadata_json.get("prompt", "") or user_msg.content.replace("Generate 3D model: ", "")
-        except Exception:
-            pass
-
-    cache_key = None
-    if prompt:
-        cache_key = hashlib.md5(f"{prompt.lower().strip()}|glb".encode()).hexdigest()[:16]
-
     job = JobModel(
         session_id=current_session_id,
         status="succeeded",
-        prompt=prompt or "Image-to-3D generation",
+        prompt="Image-to-3D generation",
         output_format="glb",
         started_at=datetime.now(timezone.utc),
         finished_at=datetime.now(timezone.utc),
@@ -374,8 +352,6 @@ async def _persist_image_to_3d_asset(
         metadata_json={
             "runpod_id": runpod_id,
             "model_url": model_url,
-            "cache_key": cache_key,
-            "prompt": prompt,
         },
     )
     db.add(asset)
@@ -575,29 +551,6 @@ async def _resolve_search_image(query: str) -> str | None:
     return None
 
 
-async def _check_image_to_3d_cache(prompt: str, output_format: str) -> str | None:
-    """Check if we already generated a model for this prompt. Returns existing GLB URL if found."""
-    import hashlib
-
-    if not prompt or len(prompt.strip()) < 3:
-        return None
-
-    cache_key = hashlib.md5(f"{prompt.lower().strip()}|{output_format}".encode()).hexdigest()[:16]
-
-    async with SessionLocal() as cdb:
-        result = await cdb.execute(
-            select(AssetModel)
-            .where(AssetModel.asset_type == "image_to_3d_glb")
-            .where(AssetModel.metadata_json["cache_key"].astext == cache_key)
-            .order_by(AssetModel.created_at.desc())
-            .limit(1)
-        )
-        existing = result.scalar_one_or_none()
-        if existing and existing.uri:
-            return existing.uri
-    return None
-
-
 async def _handle_image_to_3d_request(
     *,
     chat_id: str,
@@ -608,48 +561,6 @@ async def _handle_image_to_3d_request(
     import logging
 
     logger = logging.getLogger(__name__)
-
-    # Cache lookup: if we already generated a model for this exact prompt, reuse it
-    cached_url = await _check_image_to_3d_cache(payload.prompt, payload.output_format)
-    if cached_url:
-        logger.info(f"Cache hit for '{payload.prompt}' → {cached_url}")
-        # Save messages and asset link, return immediately with the cached URL
-        user_message = MessageModel(
-            chat_id=chat_id,
-            role="user",
-            content=f"Generate 3D model: {payload.prompt}",
-            metadata_json={"action": "image_to_3d", "cached": True, "output_format": payload.output_format},
-        )
-        db.add(user_message)
-        await db.commit()
-        await db.refresh(user_message)
-
-        assistant_message = MessageModel(
-            chat_id=chat_id,
-            role="assistant",
-            content=json.dumps({"download_url": cached_url, "status": "success", "cached": True}),
-            metadata_json={
-                "output": {"download_url": cached_url, "uri": cached_url, "status": "success", "cached": True},
-            },
-        )
-        db.add(assistant_message)
-        await db.commit()
-
-        # Push completion event via WebSocket so frontend updates immediately
-        await chat_socket_manager.send_to_chat(chat_id, {
-            "type": "runpod.status",
-            "chat_id": chat_id,
-            "runpod_id": f"cached-{user_message.id}",
-            "status": "COMPLETED",
-            "action": "image_to_3d",
-            "output": {"download_url": cached_url, "uri": cached_url, "status": "success", "cached": True},
-        })
-
-        return ImageTo3DResponse(
-            status="cached",
-            runpod_id=f"cached-{user_message.id}",
-            message_id=str(user_message.id),
-        )
 
     resolved_image_url = payload.image_url
 
@@ -1273,6 +1184,8 @@ async def _handle_openscad_ws(
             chat_session_id = chat_obj.session_id if chat_obj else None
 
             # 5. Stream tokens
+            #    Pass db=None — the agent will open its own session for RAG to avoid
+            #    asyncpg "operation in progress" errors from sharing one connection.
             final_data = None
             async for event in run_agent_stream(
                 content,
@@ -1281,7 +1194,7 @@ async def _handle_openscad_ws(
                 provider=options.get("llm_provider"),
                 model=options.get("llm_model"),
                 thinking=options.get("llm_thinking", False),
-                db=db,
+                db=None,
                 code_language=options.get("code_language", "openscad"),
             ):
                 if event["type"] == "token":
