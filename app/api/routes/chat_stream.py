@@ -456,7 +456,7 @@ def _search_images_sync(query: str) -> list[dict]:
             continue
         seen.add(img_url)
         results.append({"image": img_url, "title": query})
-        if len(results) >= 8:
+        if len(results) >= 10:
             break
 
     if results:
@@ -503,10 +503,9 @@ async def _extract_search_keywords(user_message: str) -> str:
     return _clean_search_query(user_message)
 
 
-async def _resolve_search_image(query: str) -> str | None:
-    """Use LLM to extract keywords, search Brave for images, download as base64."""
+async def _fetch_image_candidates(query: str) -> list[str]:
+    """Extract keywords via LLM, search Brave for images, return list of URLs (no downloading)."""
     import logging
-    import base64
 
     logger = logging.getLogger(__name__)
 
@@ -520,37 +519,66 @@ async def _resolve_search_image(query: str) -> str | None:
         results = await loop.run_in_executor(None, _search_images_sync, search_query)
     except Exception as e:
         logger.warning(f"Image search failed for '{search_query}': {e}")
-        return None
+        return []
 
     if not results:
         logger.warning(f"No image results for '{search_query}'")
-        return None
+        return []
 
     logger.info(f"Found {len(results)} image results for '{search_query}'")
 
-    # Step 3: Download first usable image
-    for r in results:
-        url = r.get("image") or r.get("thumbnail")
-        if not url:
-            continue
-        try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
-                resp = await http.get(url)
-                resp.raise_for_status()
-                ct = resp.headers.get("content-type", "image/jpeg")
-                if "image" not in ct:
-                    continue
-                if len(resp.content) > 5 * 1024 * 1024:
-                    continue
-                b64 = base64.b64encode(resp.content).decode("utf-8")
-                media_type = ct.split(";")[0].strip()
-                logger.info(f"Resolved '{search_query}' → {url} ({len(resp.content)} bytes)")
-                return f"data:{media_type};base64,{b64}"
-        except Exception as e:
-            logger.debug(f"Failed to download {url}: {e}")
-            continue
+    # Return raw URLs without downloading
+    urls = [r.get("image") or r.get("thumbnail") for r in results if r.get("image") or r.get("thumbnail")]
+    return urls
 
-    logger.warning(f"All image downloads failed for '{search_query}'")
+
+async def _download_image_as_base64(url: str) -> str | None:
+    """Download a single image URL and return as base64 data URL."""
+    import logging
+    import base64
+
+    logger = logging.getLogger(__name__)
+
+    if not url:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
+            resp = await http.get(url)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "image/jpeg")
+            if "image" not in ct:
+                logger.debug(f"Invalid content-type for {url}: {ct}")
+                return None
+            if len(resp.content) > 5 * 1024 * 1024:
+                logger.debug(f"Image too large: {len(resp.content)} bytes")
+                return None
+            b64 = base64.b64encode(resp.content).decode("utf-8")
+            media_type = ct.split(";")[0].strip()
+            logger.info(f"Downloaded image {url} ({len(resp.content)} bytes)")
+            return f"data:{media_type};base64,{b64}"
+    except Exception as e:
+        logger.debug(f"Failed to download {url}: {e}")
+        return None
+
+
+async def _resolve_search_image(query: str) -> str | None:
+    """Use LLM to extract keywords, search Brave for images, download first as base64 (legacy path)."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    candidates = await _fetch_image_candidates(query)
+    if not candidates:
+        return None
+
+    # Download first usable image
+    for url in candidates:
+        b64_url = await _download_image_as_base64(url)
+        if b64_url:
+            return b64_url
+
+    logger.warning(f"All image downloads failed")
     return None
 
 
@@ -562,21 +590,55 @@ async def _handle_image_to_3d_request(
 ) -> ImageTo3DResponse:
     """Submit an image-to-3D job to RunPod and start polling."""
     import logging
+    import uuid as _uuid
+    from app.services import image_search_pending
 
     logger = logging.getLogger(__name__)
 
     resolved_image_url = payload.image_url
 
-    # No image provided but prompt exists — search for a reference image
+    # No image provided but prompt exists — search for reference images and wait for user selection
     if not resolved_image_url and payload.prompt:
         logger.info(f"No image provided, searching for: {payload.prompt}")
-        found_url = await _resolve_search_image(payload.prompt)
-        if found_url:
-            resolved_image_url = found_url
-        else:
+
+        # Fetch candidate images (without downloading yet)
+        candidates = await _fetch_image_candidates(payload.prompt)
+        if not candidates:
             raise HTTPException(
                 status_code=422,
-                detail=f"Could not find a reference image for '{payload.prompt}'. Try uploading an image instead.",
+                detail=f"Could not find reference images for '{payload.prompt}'. Try uploading an image instead.",
+            )
+
+        # Generate request ID and send options to frontend
+        request_id = str(_uuid.uuid4())
+        search_query = await _extract_search_keywords(payload.prompt)
+
+        await chat_socket_manager.send_to_chat(chat_id, {
+            "type": "image_to_3d.image_options",
+            "chat_id": chat_id,
+            "search_query": search_query,
+            "image_urls": candidates,
+            "request_id": request_id,
+            "prompt": payload.prompt,
+        })
+
+        # Register pending future and wait for user selection
+        fut = image_search_pending.register(request_id)
+        try:
+            selected_url = await asyncio.wait_for(asyncio.shield(fut), timeout=120.0)
+        except asyncio.TimeoutError:
+            image_search_pending.cancel(request_id)
+            raise HTTPException(
+                status_code=408,
+                detail="Image selection timed out. Please try again.",
+            )
+
+        # Download the selected image
+        resolved_image_url = await _download_image_as_base64(selected_url)
+        if not resolved_image_url:
+            raise HTTPException(
+                status_code=422,
+                detail="Failed to download selected image. Please try another image.",
             )
 
     # Save user message
@@ -631,6 +693,40 @@ async def _handle_image_to_3d_request(
         runpod_id=runpod_id,
         message_id=str(user_message.id),
     )
+
+
+async def _handle_image_to_3d_ws_task(
+    websocket: WebSocket,
+    chat_id: str,
+    payload: dict,
+) -> None:
+    """Async task wrapper for image-to-3D WS handler to keep WS loop responsive."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        i3d_payload = ImageTo3DRequest.model_validate(payload.get("payload", {}))
+        async with SessionLocal() as db:
+            response = await _handle_image_to_3d_request(
+                chat_id=chat_id,
+                payload=i3d_payload,
+                db=db,
+            )
+        await websocket.send_json({
+            "type": "image_to_3d.queued",
+            "chat_id": chat_id,
+            "runpod_id": response.runpod_id,
+            "message_id": response.message_id,
+            "status": response.status,
+        })
+    except Exception as e:
+        logger.error(f"Image-to-3D WS error: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "image_to_3d.error",
+            "chat_id": chat_id,
+            "message": str(e),
+        })
 
 
 async def _handle_runpod_request(
@@ -1386,31 +1482,18 @@ async def chat_socket(
                 asyncio.create_task(_handle_openscad_ws(websocket, chat_id, payload))
                 continue
 
-            # Handle image-to-3D requests
+            # Handle image-to-3D requests (async task so WS loop stays responsive during image selection)
             if msg_type == "image_to_3d.request":
-                try:
-                    i3d_payload = ImageTo3DRequest.model_validate(payload.get("payload", {}))
-                    async with SessionLocal() as db:
-                        response = await _handle_image_to_3d_request(
-                            chat_id=chat_id,
-                            payload=i3d_payload,
-                            db=db,
-                        )
-                    await websocket.send_json({
-                        "type": "image_to_3d.queued",
-                        "chat_id": chat_id,
-                        "runpod_id": response.runpod_id,
-                        "message_id": response.message_id,
-                        "status": response.status,
-                    })
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(f"Image-to-3D WS error: {e}")
-                    await websocket.send_json({
-                        "type": "image_to_3d.error",
-                        "chat_id": chat_id,
-                        "message": str(e),
-                    })
+                asyncio.create_task(_handle_image_to_3d_ws_task(websocket, chat_id, payload))
+                continue
+
+            # Handle image selection for pending image-to-3D requests
+            if msg_type == "image_to_3d.image_selected":
+                from app.services import image_search_pending
+                request_id = payload.get("request_id")
+                selected_url = payload.get("image_url")
+                if request_id and selected_url:
+                    image_search_pending.resolve(request_id, selected_url)
                 continue
 
             # Handle RunPod requests

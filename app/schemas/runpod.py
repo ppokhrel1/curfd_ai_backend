@@ -24,7 +24,7 @@ class ChatRunpodResponse(BaseModel):
 
 
 class ImageTo3DRequest(BaseModel):
-    image_url: str  # Base64 data URL or HTTPS URL
+    image_url: str | None = None  # Base64 data URL or HTTPS URL; optional when prompt is provided
     prompt: str = ""
     output_format: Literal["glb", "stl"] = "glb"
 

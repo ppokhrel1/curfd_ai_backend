@@ -1,12 +1,16 @@
-"""Tests for image-to-3D pipeline: search query extraction, image search, storage proxy."""
+"""Tests for image-to-3D pipeline: search query extraction, image search, storage proxy, image selection."""
 
 import pytest
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.api.routes.chat_stream import (
     _clean_search_query,
     _search_images_sync,
+    _fetch_image_candidates,
+    _download_image_as_base64,
 )
+from app.services import image_search_pending
 
 
 # --- Query Cleaning ---
@@ -163,3 +167,136 @@ async def test_storage_proxy_endpoint_exists():
         # Endpoint exists (not 404/405). May return 400/500/502 without real supabase.
         assert resp.status_code != 405, "Storage proxy route not found"
         assert resp.status_code != 404 or "File not found" in resp.text
+
+
+# --- Image Search Pending Registry ---
+
+class TestImageSearchPending:
+    def test_register_creates_future(self):
+        image_search_pending.cleanup_all()
+        request_id = "test-123"
+        fut = image_search_pending.register(request_id)
+        assert isinstance(fut, asyncio.Future)
+        assert not fut.done()
+
+    def test_resolve_sets_result(self):
+        image_search_pending.cleanup_all()
+        request_id = "test-456"
+        fut = image_search_pending.register(request_id)
+        success = image_search_pending.resolve(request_id, "https://example.com/image.jpg")
+        assert success is True
+        assert fut.done()
+        assert fut.result() == "https://example.com/image.jpg"
+
+    def test_resolve_unknown_id_returns_false(self):
+        image_search_pending.cleanup_all()
+        success = image_search_pending.resolve("unknown-id", "https://example.com/image.jpg")
+        assert success is False
+
+    def test_cancel_cancels_future(self):
+        image_search_pending.cleanup_all()
+        request_id = "test-cancel"
+        fut = image_search_pending.register(request_id)
+        success = image_search_pending.cancel(request_id)
+        assert success is True
+        assert fut.done()
+        assert fut.cancelled()
+
+    def test_cancel_unknown_id_returns_false(self):
+        image_search_pending.cleanup_all()
+        success = image_search_pending.cancel("unknown-id")
+        assert success is False
+
+    def test_cleanup_all_cancels_all(self):
+        image_search_pending.cleanup_all()
+        fut1 = image_search_pending.register("id1")
+        fut2 = image_search_pending.register("id2")
+        image_search_pending.cleanup_all()
+        assert fut1.cancelled()
+        assert fut2.cancelled()
+
+
+# --- Fetch Image Candidates ---
+
+@pytest.mark.asyncio
+async def test_fetch_image_candidates_returns_urls():
+    with patch("app.api.routes.chat_stream._extract_search_keywords", new_callable=AsyncMock) as mock_kw, \
+         patch("app.api.routes.chat_stream._search_images_sync") as mock_search:
+
+        mock_kw.return_value = "ring product photo"
+        mock_search.return_value = [
+            {"image": "https://example.com/ring1.jpg"},
+            {"image": "https://example.com/ring2.jpg"},
+            {"image": "https://example.com/ring3.jpg"},
+        ]
+
+        urls = await _fetch_image_candidates("gold ring")
+        assert len(urls) == 3
+        assert all(isinstance(u, str) for u in urls)
+        assert "example.com/ring1.jpg" in urls[0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_candidates_no_results():
+    with patch("app.api.routes.chat_stream._extract_search_keywords", new_callable=AsyncMock) as mock_kw, \
+         patch("app.api.routes.chat_stream._search_images_sync") as mock_search:
+
+        mock_kw.return_value = "nonexistent xyz 123"
+        mock_search.return_value = []
+
+        urls = await _fetch_image_candidates("nonexistent xyz 123")
+        assert urls == []
+
+
+# --- Download Image as Base64 ---
+
+@pytest.mark.asyncio
+async def test_download_image_as_base64_success():
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.content = b"\xff\xd8\xff" * 100
+    mock_resp.headers = {"content-type": "image/jpeg"}
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    with patch("httpx.AsyncClient") as mock_ac:
+        mock_ac.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ac.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _download_image_as_base64("https://example.com/ring.jpg")
+        assert result is not None
+        assert result.startswith("data:image/jpeg;base64,")
+
+
+@pytest.mark.asyncio
+async def test_download_image_as_base64_invalid_content_type():
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.content = b"<html>not an image</html>"
+    mock_resp.headers = {"content-type": "text/html"}
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    with patch("httpx.AsyncClient") as mock_ac:
+        mock_ac.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ac.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _download_image_as_base64("https://example.com/notimage.html")
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_download_image_as_base64_network_error():
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(side_effect=Exception("Network error"))
+
+    with patch("httpx.AsyncClient") as mock_ac:
+        mock_ac.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ac.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _download_image_as_base64("https://example.com/image.jpg")
+        assert result is None
