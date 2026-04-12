@@ -588,58 +588,22 @@ async def _handle_image_to_3d_request(
     payload: ImageTo3DRequest,
     db: AsyncSession,
 ) -> ImageTo3DResponse:
-    """Submit an image-to-3D job to RunPod and start polling."""
+    """Submit an image-to-3D job to RunPod and start polling.
+
+    If no image_url is provided, this function should NOT be called directly.
+    Use the HTTP endpoint or WS task which handle image search + selection first.
+    """
     import logging
-    import uuid as _uuid
-    from app.services import image_search_pending
 
     logger = logging.getLogger(__name__)
 
     resolved_image_url = payload.image_url
 
-    # No image provided but prompt exists — search for reference images and wait for user selection
-    if not resolved_image_url and payload.prompt:
-        logger.info(f"No image provided, searching for: {payload.prompt}")
-
-        # Fetch candidate images (without downloading yet)
-        candidates = await _fetch_image_candidates(payload.prompt)
-        if not candidates:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Could not find reference images for '{payload.prompt}'. Try uploading an image instead.",
-            )
-
-        # Generate request ID and send options to frontend
-        request_id = str(_uuid.uuid4())
-        search_query = await _extract_search_keywords(payload.prompt)
-
-        await chat_socket_manager.send_to_chat(chat_id, {
-            "type": "image_to_3d.image_options",
-            "chat_id": chat_id,
-            "search_query": search_query,
-            "image_urls": candidates,
-            "request_id": request_id,
-            "prompt": payload.prompt,
-        })
-
-        # Register pending future and wait for user selection
-        fut = image_search_pending.register(request_id)
-        try:
-            selected_url = await asyncio.wait_for(asyncio.shield(fut), timeout=120.0)
-        except asyncio.TimeoutError:
-            image_search_pending.cancel(request_id)
-            raise HTTPException(
-                status_code=408,
-                detail="Image selection timed out. Please try again.",
-            )
-
-        # Download the selected image
-        resolved_image_url = await _download_image_as_base64(selected_url)
-        if not resolved_image_url:
-            raise HTTPException(
-                status_code=422,
-                detail="Failed to download selected image. Please try another image.",
-            )
+    if not resolved_image_url:
+        raise HTTPException(
+            status_code=422,
+            detail="image_url is required. Use the image search flow to select an image first.",
+        )
 
     # Save user message
     user_message = MessageModel(
@@ -700,13 +664,48 @@ async def _handle_image_to_3d_ws_task(
     chat_id: str,
     payload: dict,
 ) -> None:
-    """Async task wrapper for image-to-3D WS handler to keep WS loop responsive."""
+    """Async task wrapper for image-to-3D WS handler.
+
+    If image_url is provided, goes straight to generation.
+    If only prompt is provided, sends image options for user selection (non-blocking).
+    """
     import logging
+    import uuid as _uuid
 
     logger = logging.getLogger(__name__)
 
     try:
         i3d_payload = ImageTo3DRequest.model_validate(payload.get("payload", {}))
+
+        # If no image provided, search and send options — don't block
+        if not i3d_payload.image_url and i3d_payload.prompt:
+            logger.info(f"No image provided via WS, searching for: {i3d_payload.prompt}")
+
+            candidates = await _fetch_image_candidates(i3d_payload.prompt)
+            if not candidates:
+                await websocket.send_json({
+                    "type": "image_to_3d.error",
+                    "chat_id": chat_id,
+                    "message": f"Could not find reference images for '{i3d_payload.prompt}'. Try uploading an image instead.",
+                })
+                return
+
+            request_id = str(_uuid.uuid4())
+            search_query = await _extract_search_keywords(i3d_payload.prompt)
+
+            # Send image options to frontend — user picks via image_to_3d.image_selected
+            await websocket.send_json({
+                "type": "image_to_3d.image_options",
+                "chat_id": chat_id,
+                "search_query": search_query,
+                "image_urls": candidates,
+                "request_id": request_id,
+                "prompt": i3d_payload.prompt,
+                "output_format": i3d_payload.output_format,
+            })
+            return  # Non-blocking — generation starts when user selects an image
+
+        # Image provided — go straight to generation
         async with SessionLocal() as db:
             response = await _handle_image_to_3d_request(
                 chat_id=chat_id,
@@ -722,6 +721,56 @@ async def _handle_image_to_3d_ws_task(
         })
     except Exception as e:
         logger.error(f"Image-to-3D WS error: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "image_to_3d.error",
+            "chat_id": chat_id,
+            "message": str(e),
+        })
+
+
+async def _handle_image_selected_ws(
+    websocket: WebSocket,
+    chat_id: str,
+    selected_url: str,
+    prompt: str,
+    output_format: str,
+) -> None:
+    """Download the user-selected image and start 3D generation."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        logger.info(f"Downloading selected image: {selected_url}")
+        b64_url = await _download_image_as_base64(selected_url)
+        if not b64_url:
+            await websocket.send_json({
+                "type": "image_to_3d.error",
+                "chat_id": chat_id,
+                "message": "Failed to download selected image. Please try another.",
+            })
+            return
+
+        # Now trigger generation with the downloaded base64 image
+        async with SessionLocal() as db:
+            response = await _handle_image_to_3d_request(
+                chat_id=chat_id,
+                payload=ImageTo3DRequest(
+                    image_url=b64_url,
+                    prompt=prompt,
+                    output_format=output_format,
+                ),
+                db=db,
+            )
+        await websocket.send_json({
+            "type": "image_to_3d.queued",
+            "chat_id": chat_id,
+            "runpod_id": response.runpod_id,
+            "message_id": response.message_id,
+            "status": response.status,
+        })
+    except Exception as e:
+        logger.error(f"Image selection handler error: {e}", exc_info=True)
         await websocket.send_json({
             "type": "image_to_3d.error",
             "chat_id": chat_id,
@@ -1212,9 +1261,17 @@ async def runpod_chat(
     return await _handle_runpod_request(chat_id=chat_id, payload=payload, db=db)
 
 
+class ImageSearchResponse(BaseModel):
+    """Returned when the HTTP endpoint needs user to pick an image first."""
+    status: str = "image_selection_required"
+    search_query: str
+    image_urls: list[str]
+    request_id: str
+    prompt: str
+
+
 @router.post(
     "/chats/{chat_id}/image-to-3d",
-    response_model=ImageTo3DResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def image_to_3d_chat(
@@ -1222,7 +1279,13 @@ async def image_to_3d_chat(
     payload: ImageTo3DRequest,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
-):
+) -> ImageTo3DResponse | ImageSearchResponse:
+    import uuid as _uuid
+    import logging
+    from app.services import image_search_pending
+
+    logger = logging.getLogger(__name__)
+
     row = (
         await db.execute(
             select(ChatModel, SessionModel.user_id)
@@ -1235,7 +1298,44 @@ async def image_to_3d_chat(
     _, owner_id = row
     if owner_id and owner_id != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
-    return await _handle_image_to_3d_request(chat_id=chat_id, payload=payload, db=db)
+
+    # If image is already provided, go straight to generation
+    if payload.image_url:
+        return await _handle_image_to_3d_request(chat_id=chat_id, payload=payload, db=db)
+
+    # No image — fetch candidates and return them for user selection (non-blocking)
+    if not payload.prompt:
+        raise HTTPException(status_code=422, detail="Either image_url or prompt is required")
+
+    candidates = await _fetch_image_candidates(payload.prompt)
+    if not candidates:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not find reference images for '{payload.prompt}'. Try uploading an image instead.",
+        )
+
+    request_id = str(_uuid.uuid4())
+    search_query = await _extract_search_keywords(payload.prompt)
+
+    # Send options to any connected WebSocket clients
+    await chat_socket_manager.send_to_chat(chat_id, {
+        "type": "image_to_3d.image_options",
+        "chat_id": chat_id,
+        "search_query": search_query,
+        "image_urls": candidates,
+        "request_id": request_id,
+        "prompt": payload.prompt,
+    })
+
+    # Register pending future — will be resolved via WebSocket image_to_3d.image_selected
+    image_search_pending.register(request_id)
+
+    return ImageSearchResponse(
+        search_query=search_query,
+        image_urls=candidates,
+        request_id=request_id,
+        prompt=payload.prompt,
+    )
 
 
 async def _handle_openscad_ws(
@@ -1487,13 +1587,15 @@ async def chat_socket(
                 asyncio.create_task(_handle_image_to_3d_ws_task(websocket, chat_id, payload))
                 continue
 
-            # Handle image selection for pending image-to-3D requests
+            # Handle image selection — user picked an image, download it and start 3D generation
             if msg_type == "image_to_3d.image_selected":
-                from app.services import image_search_pending
-                request_id = payload.get("request_id")
                 selected_url = payload.get("image_url")
-                if request_id and selected_url:
-                    image_search_pending.resolve(request_id, selected_url)
+                prompt = payload.get("prompt", "")
+                output_format = payload.get("output_format", "glb")
+                if selected_url:
+                    asyncio.create_task(_handle_image_selected_ws(
+                        websocket, chat_id, selected_url, prompt, output_format
+                    ))
                 continue
 
             # Handle RunPod requests
