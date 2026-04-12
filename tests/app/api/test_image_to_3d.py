@@ -230,10 +230,11 @@ async def test_fetch_image_candidates_returns_urls():
             {"image": "https://example.com/ring3.jpg"},
         ]
 
-        urls = await _fetch_image_candidates("gold ring")
+        urls, search_query = await _fetch_image_candidates("gold ring")
         assert len(urls) == 3
         assert all(isinstance(u, str) for u in urls)
         assert "example.com/ring1.jpg" in urls[0]
+        assert search_query == "ring product photo"
 
 
 @pytest.mark.asyncio
@@ -244,8 +245,9 @@ async def test_fetch_image_candidates_no_results():
         mock_kw.return_value = "nonexistent xyz 123"
         mock_search.return_value = []
 
-        urls = await _fetch_image_candidates("nonexistent xyz 123")
+        urls, search_query = await _fetch_image_candidates("nonexistent xyz 123")
         assert urls == []
+        assert search_query == "nonexistent xyz 123"
 
 
 # --- Download Image as Base64 ---

@@ -503,8 +503,8 @@ async def _extract_search_keywords(user_message: str) -> str:
     return _clean_search_query(user_message)
 
 
-async def _fetch_image_candidates(query: str) -> list[str]:
-    """Extract keywords via LLM, search Brave for images, return list of URLs (no downloading)."""
+async def _fetch_image_candidates(query: str) -> tuple[list[str], str]:
+    """Extract keywords via LLM, search Brave for images, return (list of URLs, search_query)."""
     import logging
 
     logger = logging.getLogger(__name__)
@@ -519,17 +519,17 @@ async def _fetch_image_candidates(query: str) -> list[str]:
         results = await loop.run_in_executor(None, _search_images_sync, search_query)
     except Exception as e:
         logger.warning(f"Image search failed for '{search_query}': {e}")
-        return []
+        return [], search_query
 
     if not results:
         logger.warning(f"No image results for '{search_query}'")
-        return []
+        return [], search_query
 
     logger.info(f"Found {len(results)} image results for '{search_query}'")
 
     # Return raw URLs without downloading
     urls = [r.get("image") or r.get("thumbnail") for r in results if r.get("image") or r.get("thumbnail")]
-    return urls
+    return urls, search_query
 
 
 async def _download_image_as_base64(url: str) -> str | None:
@@ -542,23 +542,36 @@ async def _download_image_as_base64(url: str) -> str | None:
     if not url:
         return None
 
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        "Referer": "https://www.google.com/",
+    }
+
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
-            resp = await http.get(url)
+            resp = await http.get(url, headers=headers)
             resp.raise_for_status()
             ct = resp.headers.get("content-type", "image/jpeg")
             if "image" not in ct:
-                logger.debug(f"Invalid content-type for {url}: {ct}")
+                logger.warning(f"Invalid content-type for {url}: {ct} (status={resp.status_code})")
                 return None
             if len(resp.content) > 5 * 1024 * 1024:
-                logger.debug(f"Image too large: {len(resp.content)} bytes")
+                logger.warning(f"Image too large: {url} ({len(resp.content)} bytes)")
+                return None
+            if len(resp.content) < 100:
+                logger.warning(f"Image too small (likely placeholder): {url} ({len(resp.content)} bytes)")
                 return None
             b64 = base64.b64encode(resp.content).decode("utf-8")
             media_type = ct.split(";")[0].strip()
-            logger.info(f"Downloaded image {url} ({len(resp.content)} bytes)")
+            logger.info(f"Downloaded image {url} ({len(resp.content)} bytes, {media_type})")
             return f"data:{media_type};base64,{b64}"
     except Exception as e:
-        logger.debug(f"Failed to download {url}: {e}")
+        logger.warning(f"Failed to download {url}: {e}")
         return None
 
 
@@ -568,7 +581,7 @@ async def _resolve_search_image(query: str) -> str | None:
 
     logger = logging.getLogger(__name__)
 
-    candidates = await _fetch_image_candidates(query)
+    candidates, _ = await _fetch_image_candidates(query)
     if not candidates:
         return None
 
@@ -681,7 +694,7 @@ async def _handle_image_to_3d_ws_task(
         if not i3d_payload.image_url and i3d_payload.prompt:
             logger.info(f"No image provided via WS, searching for: {i3d_payload.prompt}")
 
-            candidates = await _fetch_image_candidates(i3d_payload.prompt)
+            candidates, search_query = await _fetch_image_candidates(i3d_payload.prompt)
             if not candidates:
                 await websocket.send_json({
                     "type": "image_to_3d.error",
@@ -691,7 +704,6 @@ async def _handle_image_to_3d_ws_task(
                 return
 
             request_id = str(_uuid.uuid4())
-            search_query = await _extract_search_keywords(i3d_payload.prompt)
 
             # Send image options to frontend — user picks via image_to_3d.image_selected
             await websocket.send_json({
@@ -1261,7 +1273,10 @@ async def runpod_chat(
     return await _handle_runpod_request(chat_id=chat_id, payload=payload, db=db)
 
 
-class ImageSearchResponse(BaseModel):
+from pydantic import BaseModel as _BaseModel
+
+
+class ImageSearchResponse(_BaseModel):
     """Returned when the HTTP endpoint needs user to pick an image first."""
     status: str = "image_selection_required"
     search_query: str
@@ -1307,7 +1322,7 @@ async def image_to_3d_chat(
     if not payload.prompt:
         raise HTTPException(status_code=422, detail="Either image_url or prompt is required")
 
-    candidates = await _fetch_image_candidates(payload.prompt)
+    candidates, search_query = await _fetch_image_candidates(payload.prompt)
     if not candidates:
         raise HTTPException(
             status_code=422,
@@ -1315,7 +1330,6 @@ async def image_to_3d_chat(
         )
 
     request_id = str(_uuid.uuid4())
-    search_query = await _extract_search_keywords(payload.prompt)
 
     # Send options to any connected WebSocket clients
     await chat_socket_manager.send_to_chat(chat_id, {
