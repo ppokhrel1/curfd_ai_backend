@@ -273,6 +273,27 @@ async def test_download_image_as_base64_success():
 
 
 @pytest.mark.asyncio
+async def test_download_image_as_base64_binary_octet_stream():
+    """CDNs often return binary/octet-stream — should infer type from URL extension."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.content = b"\xff\xd8\xff" * 100
+    mock_resp.headers = {"content-type": "binary/octet-stream"}
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    with patch("httpx.AsyncClient") as mock_ac:
+        mock_ac.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ac.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _download_image_as_base64("https://cdn.example.com/photo.webp")
+        assert result is not None
+        assert result.startswith("data:image/webp;base64,")
+
+
+@pytest.mark.asyncio
 async def test_download_image_as_base64_invalid_content_type():
     mock_resp = MagicMock()
     mock_resp.status_code = 200

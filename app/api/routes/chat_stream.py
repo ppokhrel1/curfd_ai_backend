@@ -552,14 +552,40 @@ async def _download_image_as_base64(url: str) -> str | None:
         "Referer": "https://www.google.com/",
     }
 
+    # Map file extensions to MIME types for when content-type is generic
+    _EXT_TO_MIME = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".webp": "image/webp",
+        ".gif": "image/gif", ".bmp": "image/bmp",
+        ".svg": "image/svg+xml",
+    }
+
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
             resp = await http.get(url, headers=headers)
             resp.raise_for_status()
-            ct = resp.headers.get("content-type", "image/jpeg")
-            if "image" not in ct:
-                logger.warning(f"Invalid content-type for {url}: {ct} (status={resp.status_code})")
-                return None
+            ct = resp.headers.get("content-type", "")
+            media_type = ct.split(";")[0].strip()
+
+            # Many CDNs return binary/octet-stream — infer type from URL extension
+            if "image" not in media_type:
+                import re
+                ext_match = re.search(r'\.(jpe?g|png|webp|gif|bmp|svg)', url.lower())
+                if ext_match:
+                    ext = "." + ext_match.group(1)
+                    if ext == ".jpeg":
+                        ext = ".jpg"
+                    inferred = _EXT_TO_MIME.get(ext)
+                    if inferred:
+                        logger.info(f"Inferred media type {inferred} from URL extension for {url} (server sent {media_type})")
+                        media_type = inferred
+                    else:
+                        logger.warning(f"Invalid content-type for {url}: {ct} (status={resp.status_code})")
+                        return None
+                else:
+                    logger.warning(f"Invalid content-type for {url}: {ct} (status={resp.status_code})")
+                    return None
+
             if len(resp.content) > 5 * 1024 * 1024:
                 logger.warning(f"Image too large: {url} ({len(resp.content)} bytes)")
                 return None
@@ -567,7 +593,6 @@ async def _download_image_as_base64(url: str) -> str | None:
                 logger.warning(f"Image too small (likely placeholder): {url} ({len(resp.content)} bytes)")
                 return None
             b64 = base64.b64encode(resp.content).decode("utf-8")
-            media_type = ct.split(";")[0].strip()
             logger.info(f"Downloaded image {url} ({len(resp.content)} bytes, {media_type})")
             return f"data:{media_type};base64,{b64}"
     except Exception as e:
@@ -747,28 +772,22 @@ async def _handle_image_selected_ws(
     prompt: str,
     output_format: str,
 ) -> None:
-    """Download the user-selected image and start 3D generation."""
+    """Start 3D generation with the user-selected image URL.
+
+    The RunPod worker supports both base64 data URLs and raw HTTPS URLs,
+    so we pass the URL directly without downloading first.
+    """
     import logging
 
     logger = logging.getLogger(__name__)
 
     try:
-        logger.info(f"Downloading selected image: {selected_url}")
-        b64_url = await _download_image_as_base64(selected_url)
-        if not b64_url:
-            await websocket.send_json({
-                "type": "image_to_3d.error",
-                "chat_id": chat_id,
-                "message": "Failed to download selected image. Please try another.",
-            })
-            return
-
-        # Now trigger generation with the downloaded base64 image
+        logger.info(f"Starting 3D generation with selected image: {selected_url}")
         async with SessionLocal() as db:
             response = await _handle_image_to_3d_request(
                 chat_id=chat_id,
                 payload=ImageTo3DRequest(
-                    image_url=b64_url,
+                    image_url=selected_url,
                     prompt=prompt,
                     output_format=output_format,
                 ),
