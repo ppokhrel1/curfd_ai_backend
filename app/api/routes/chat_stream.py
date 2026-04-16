@@ -358,6 +358,7 @@ async def _persist_image_to_3d_asset(
 
     # Create child assets for parts if available
     parts = data.get("parts", [])
+    persisted_parts = []
     for part in parts:
         part_name = part.get("name", "part")
         part_url = part.get("mesh_url") or part.get("url")
@@ -369,10 +370,19 @@ async def _persist_image_to_3d_asset(
                 storage_provider="runpod",
                 metadata_json={
                     "part_name": part_name,
+                    "primitive": part.get("primitive", "part"),
                     "parent_runpod_id": runpod_id,
+                    "is_watertight": part.get("is_watertight", False),
                 },
             )
             db.add(part_asset)
+            persisted_parts.append({
+                "name": part_name,
+                "mesh_url": part_url,
+                "primitive": part.get("primitive", "part"),
+                "face_count": part.get("face_count"),
+                "is_watertight": part.get("is_watertight", False),
+            })
 
     await db.commit()
     await db.refresh(asset)
@@ -389,7 +399,11 @@ async def _persist_image_to_3d_asset(
     await db.commit()
     await db.refresh(asset)
 
-    return _serialize_asset(asset)
+    # Return parent asset + parts so they're included in the assistant message metadata
+    result = _serialize_asset(asset)
+    if persisted_parts:
+        result["parts"] = persisted_parts
+    return result
 
 
 import re as _re
@@ -1350,18 +1364,8 @@ async def image_to_3d_chat(
 
     request_id = str(_uuid.uuid4())
 
-    # Send options to any connected WebSocket clients
-    await chat_socket_manager.send_to_chat(chat_id, {
-        "type": "image_to_3d.image_options",
-        "chat_id": chat_id,
-        "search_query": search_query,
-        "image_urls": candidates,
-        "request_id": request_id,
-        "prompt": payload.prompt,
-    })
-
-    # Register pending future — will be resolved via WebSocket image_to_3d.image_selected
-    image_search_pending.register(request_id)
+    # Don't send WebSocket event here — the frontend already handles
+    # the HTTP response and shows the picker. Sending both causes duplicates.
 
     return ImageSearchResponse(
         search_query=search_query,
