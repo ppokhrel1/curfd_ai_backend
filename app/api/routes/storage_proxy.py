@@ -1,5 +1,6 @@
-"""Proxy endpoint to serve files from Supabase Storage (private buckets)."""
+"""Proxy endpoint to serve files from Backblaze B2 object storage."""
 
+import base64
 import logging
 
 import httpx
@@ -12,40 +13,64 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Module-level B2 auth cache (one auth per backend process lifetime)
+_b2_auth_token: str | None = None
+_b2_download_url: str | None = None
+
+
+def _ensure_b2_auth() -> None:
+    global _b2_auth_token, _b2_download_url
+    if _b2_auth_token:
+        return
+    key_id = settings.b2_key_id
+    app_key = settings.b2_application_key
+    if not key_id or not app_key:
+        raise HTTPException(status_code=500, detail="B2 credentials not configured")
+    auth_string = base64.b64encode(f"{key_id}:{app_key}".encode()).decode()
+    resp = httpx.get(
+        "https://api.backblazeb2.com/b2api/v2/b2_authorize_account",
+        headers={"Authorization": f"Basic {auth_string}"},
+        timeout=15,
+    )
+    if not resp.is_success:
+        raise HTTPException(status_code=502, detail="B2 auth failed")
+    data = resp.json()
+    _b2_auth_token = data["authorizationToken"]
+    _b2_download_url = data["downloadUrl"]
+    logger.info("B2 storage proxy auth OK")
+
 
 @router.get("/{bucket}/{file_path:path}")
 async def proxy_storage_file(
     bucket: str = Path(...),
     file_path: str = Path(...),
 ):
-    """Download a file from Supabase Storage and stream it to the client."""
-    supabase_url = settings.supabase_url
-    service_key = settings.supabase_service_role_key or settings.supabase_anon_key
+    """Download a file from B2 and stream it to the client."""
+    try:
+        _ensure_b2_auth()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"B2 auth error: {e}")
+        raise HTTPException(status_code=502, detail="B2 auth failed")
 
-    if not supabase_url or not service_key:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-
-    # Normalize URL — supabase_url may or may not have https:// prefix
-    base = supabase_url.rstrip("/")
-    if not base.startswith("http"):
-        base = f"https://{base}"
-
-    download_url = f"{base}/storage/v1/object/public/{bucket}/{file_path}"
+    bucket_name = settings.b2_bucket_name or bucket
+    download_url = f"{_b2_download_url}/file/{bucket_name}/{file_path}"
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(
                 download_url,
-                headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+                headers={"Authorization": _b2_auth_token},
                 follow_redirects=True,
             )
             resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        logger.error(f"Supabase storage error: {exc.response.status_code} for {download_url}")
+        logger.error(f"B2 fetch error {exc.response.status_code}: {download_url}")
         raise HTTPException(status_code=exc.response.status_code, detail="File not found")
     except Exception as exc:
-        logger.error(f"Storage proxy error: {exc}")
-        raise HTTPException(status_code=502, detail="Failed to fetch file from storage")
+        logger.error(f"B2 proxy error: {exc}")
+        raise HTTPException(status_code=502, detail="Failed to fetch file from B2")
 
     content_type = resp.headers.get("content-type", "application/octet-stream")
 

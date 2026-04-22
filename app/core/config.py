@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     image_to_3d_runpod_api_token: str | None = None  # Falls back to runpod_api_token
     image_to_3d_timeout_seconds: int = 600
 
+    # Backblaze B2 object storage
+    b2_key_id: str | None = None
+    b2_application_key: str | None = None
+    b2_bucket_name: str | None = None
+    b2_bucket_id: str | None = None
+
 
 settings = Settings()
 
