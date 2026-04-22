@@ -30,7 +30,7 @@ async def proxy_storage_file(
     if not base.startswith("http"):
         base = f"https://{base}"
 
-    download_url = f"{base}/storage/v1/object/{bucket}/{file_path}"
+    download_url = f"{base}/storage/v1/object/public/{bucket}/{file_path}"
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
