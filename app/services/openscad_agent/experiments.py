@@ -12,6 +12,7 @@ class PromptVariant:
     id: str
     code_prompt: str | None = None  # Override CODE_PROMPT (None = use default)
     jewelry_context: str | None = None  # Override JEWELRY_CONTEXT (None = use default)
+    fdm_print_context: str | None = None  # Override FDM_PRINT_CONTEXT (None = use default)
     weight: float = 1.0  # Relative weight for random assignment
 
 
@@ -87,3 +88,15 @@ def resolve_prompts(
         "variant_id": variant.id,
     }
     return resolved_code, resolved_jewelry, metadata
+
+
+def resolve_fdm_print_context() -> str:
+    """Resolve FDM_PRINT_CONTEXT, applying A/B variant if active."""
+    from app.services.openscad_agent.prompts import FDM_PRINT_CONTEXT
+
+    experiment = get_active_experiment()
+    if experiment is None:
+        return FDM_PRINT_CONTEXT
+
+    variant = experiment.pick_variant()
+    return variant.fdm_print_context if variant.fdm_print_context is not None else FDM_PRINT_CONTEXT

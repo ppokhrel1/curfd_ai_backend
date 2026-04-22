@@ -68,6 +68,46 @@ Key: prongs grow FROM the band, not floating above it. Use translate to place pr
 Min thickness: 1mm band, 0.8mm prongs, 0.6mm bezel.
 """
 
+# Injected when user requests a 3D-printable / FDM-ready model
+FDM_PRINT_CONTEXT = """
+
+## 3D Printing (FDM) Constraints — Anycubic Kobra S1
+
+Build volume: 220 × 220 × 250 mm. Design must fit; if it won't, split into parts with alignment pins (2 mm diameter, 3 mm deep cylindrical pegs + matching holes).
+
+### Orientation & Base
+- The model MUST sit on a flat base on the XY plane (Z = 0). No floating geometry.
+- Chamfer (not fillet) bottom edges at 45° for better bed adhesion.
+- Heaviest / largest cross-section at the bottom.
+
+### Wall Thickness & Features
+- Minimum wall thickness: 1.2 mm (3 perimeters × 0.4 mm nozzle).
+- Minimum feature size: 0.8 mm (anything smaller won't resolve on FDM).
+- Holes meant for screws/pins: add 0.2 mm tolerance (e.g., 2 mm peg → 2.2 mm hole).
+
+### Overhangs & Supports
+- Keep overhangs ≤ 45° from vertical wherever possible — these print without supports.
+- For unavoidable overhangs > 45°, use hull() between two shapes to create a smooth, self-supporting ramp/curve.
+- Bridges up to 20 mm are OK if flat and horizontal.
+- Avoid unsupported horizontal ceilings > 20 mm; arch or dome them instead.
+
+### Structural Integrity
+- Use rounded internal corners (fillet r ≥ 1 mm) to reduce stress concentration.
+- For tall, thin features: add a fillet or gusset at the base (min 2 mm radius).
+- Prefer cylinder() with $fn ≥ 32 over low-poly approximations.
+
+### Multi-Part Assembly
+- If the model exceeds 220 mm in any axis OR has fragile overhangs, split it:
+  - Add cylindrical alignment pins: diameter 2 mm, depth 3 mm.
+  - Matching holes: diameter 2.2 mm, depth 3.2 mm (tolerance for glue).
+  - Place pins at flat mating surfaces.
+- Label split planes with a comment: // SPLIT PLANE
+
+### Parameters
+- Expose `print_scale` (default 1.0) so the user can resize for their print bed.
+- Expose `wall_thickness` (default 1.2) as a parameter.
+"""
+
 # CadQuery code generation prompt (output parsed as structured JSON)
 CADQUERY_CODE_PROMPT = """You are an expert CAD engineer using CadQuery (Python).
 

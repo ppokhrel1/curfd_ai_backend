@@ -44,6 +44,23 @@ def _detect_jewelry(text: str) -> bool:
     return any(kw in lower for kw in _JEWELRY_KEYWORDS)
 
 
+# ── 3D-printing / FDM detection ─────────────────────────────────────────────
+
+_FDM_PRINT_KEYWORDS = frozenset({
+    "3d print", "3d-print", "3dprint", "printable", "fdm", "filament",
+    "print ready", "print-ready", "slicer", "stl print", "pla", "petg",
+    "abs", "nozzle", "layer height", "infill", "supports", "bed adhesion",
+    "kobra", "anycubic", "ender", "prusa", "bambu", "print this",
+    "print it", "for printing", "to print", "i want to print",
+})
+
+
+def _detect_fdm_print(text: str) -> bool:
+    """Check if user request is about 3D-printable / FDM-ready models."""
+    lower = text.lower()
+    return any(kw in lower for kw in _FDM_PRINT_KEYWORDS)
+
+
 # Tools available to the agent
 _tools = [apply_parameter_changes, build_parametric_model, search_reference_images, generate_3d_from_image]
 _tools_by_name = {t.name: t for t in _tools}
@@ -157,6 +174,10 @@ def _build_code_prompt(
     if _detect_jewelry(user_input) and jewelry_context:
         prompt += jewelry_context
         logger.info("[PROMPT] Jewelry domain context injected")
+    if _detect_fdm_print(user_input):
+        from app.services.openscad_agent.prompts import FDM_PRINT_CONTEXT
+        prompt += FDM_PRINT_CONTEXT
+        logger.info("[PROMPT] FDM 3D-printing context injected")
     if rag_context:
         prompt += rag_context
     return prompt, experiment_meta
