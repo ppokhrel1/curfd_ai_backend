@@ -185,10 +185,43 @@ async def _build_lc_history(db: AsyncSession, chat_id: str) -> list:
 
             code = meta.get("openscad_code") if isinstance(meta, dict) else None
 
+            # Build shape context summary from metadata
+            context_lines = []
+            if isinstance(meta, dict):
+                # Model description
+                if meta.get("message"):
+                    context_lines.append(f"Description: {meta['message']}")
+                if meta.get("model_type"):
+                    context_lines.append(f"Type: {meta['model_type']}")
+                # Parameters
+                params = meta.get("parameters")
+                if params and isinstance(params, list):
+                    param_strs = [f"{p.get('name', '?')}={p.get('value', '?')}" for p in params[:15]]
+                    context_lines.append(f"Parameters: {', '.join(param_strs)}")
+                # Image-to-3D output
+                output = meta.get("output")
+                if isinstance(output, dict):
+                    model_url = output.get("model_url") or output.get("download_url") or output.get("uri")
+                    if model_url:
+                        context_lines.append(f"3D model: {model_url}")
+                    parts = output.get("parts", [])
+                    if parts:
+                        part_names = [p.get("name", "?") for p in parts]
+                        context_lines.append(f"Parts ({len(parts)}): {', '.join(part_names)}")
+
             # CADAM pattern: send raw code as assistant content so the code-gen
             # model sees its own previous output cleanly (no markdown wrapping).
             if code:
-                lc_messages.append(AIMessage(content=code))
+                content = code
+                if context_lines:
+                    # Prepend shape context as a comment block
+                    summary = "\n".join(f"// {line}" for line in context_lines)
+                    content = f"{summary}\n{code}"
+                lc_messages.append(AIMessage(content=content))
+            elif context_lines:
+                # No code but has shape context (e.g. image_to_3d result)
+                summary = "\n".join(context_lines)
+                lc_messages.append(AIMessage(content=summary))
             elif msg.content and msg.content != "Model generated.":
                 lc_messages.append(AIMessage(content=msg.content))
 
