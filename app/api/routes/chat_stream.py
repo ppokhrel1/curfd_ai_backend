@@ -779,6 +779,136 @@ async def _handle_image_to_3d_ws_task(
         })
 
 
+async def _handle_mesh_modification_ws(
+    websocket: WebSocket,
+    chat_id: str,
+    payload: dict,
+) -> None:
+    """Submit a mesh boolean-modification job to RunPod and start polling."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        inner = payload.get("payload", payload)
+        mesh_url = inner.get("mesh_url", "")
+        modification = inner.get("modification", "")
+        output_filename = inner.get("output_filename")
+
+        if not mesh_url or not modification:
+            await websocket.send_json({
+                "type": "mesh_modification.error",
+                "chat_id": chat_id,
+                "message": "mesh_url and modification are required",
+            })
+            return
+
+        client = get_image_to_3d_client()
+        job_payload: dict = {
+            "action": "modify_mesh",
+            "mesh_url": mesh_url,
+            "modification": modification,
+        }
+        if output_filename:
+            job_payload["output_filename"] = output_filename
+
+        runpod_response = await client.start_raw_job(job_payload)
+        runpod_id = runpod_response.get("id")
+        if not runpod_id:
+            await websocket.send_json({
+                "type": "mesh_modification.error",
+                "chat_id": chat_id,
+                "message": "RunPod did not return a job id",
+            })
+            return
+
+        await websocket.send_json({
+            "type": "mesh_modification.queued",
+            "chat_id": chat_id,
+            "runpod_id": runpod_id,
+        })
+        asyncio.create_task(
+            _runpod_poll_and_emit(
+                chat_id=chat_id,
+                runpod_id=runpod_id,
+                action="modify_mesh",
+                status_timeout_seconds=settings.image_to_3d_timeout_seconds,
+                runpod_client=client,
+            )
+        )
+    except Exception as e:
+        logger.error(f"Mesh modification WS error: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "mesh_modification.error",
+            "chat_id": chat_id,
+            "message": str(e),
+        })
+
+
+async def _handle_inpaint_ws(
+    websocket: WebSocket,
+    chat_id: str,
+    payload: dict,
+) -> None:
+    """Submit a Flux inpainting job to RunPod and start polling."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        inner = payload.get("payload", payload)
+        image_data = inner.get("image_data") or inner.get("image_url")
+        prompt = inner.get("prompt", "")
+
+        if not image_data or not prompt:
+            await websocket.send_json({
+                "type": "inpaint.error",
+                "chat_id": chat_id,
+                "message": "image_data and prompt are required",
+            })
+            return
+
+        client = get_image_to_3d_client()
+        job_payload = {
+            "action": "inpaint",
+            "image_data": image_data,
+            "prompt": prompt,
+        }
+        for key in ("mask_data", "strength", "steps"):
+            if inner.get(key) is not None:
+                job_payload[key] = inner[key]
+
+        runpod_response = await client.start_raw_job(job_payload)
+        runpod_id = runpod_response.get("id")
+        if not runpod_id:
+            await websocket.send_json({
+                "type": "inpaint.error",
+                "chat_id": chat_id,
+                "message": "RunPod did not return a job id",
+            })
+            return
+
+        await websocket.send_json({
+            "type": "inpaint.queued",
+            "chat_id": chat_id,
+            "runpod_id": runpod_id,
+        })
+        asyncio.create_task(
+            _runpod_poll_and_emit(
+                chat_id=chat_id,
+                runpod_id=runpod_id,
+                action="inpaint",
+                status_timeout_seconds=settings.image_to_3d_timeout_seconds,
+                runpod_client=client,
+            )
+        )
+    except Exception as e:
+        logger.error(f"Inpaint WS error: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "inpaint.error",
+            "chat_id": chat_id,
+            "message": str(e),
+        })
+
+
 async def _handle_image_selected_ws(
     websocket: WebSocket,
     chat_id: str,
@@ -1633,6 +1763,16 @@ async def chat_socket(
                     asyncio.create_task(_handle_image_selected_ws(
                         websocket, chat_id, selected_url, prompt, output_format
                     ))
+                continue
+
+            # Handle mesh boolean modification requests
+            if msg_type == "mesh_modification.request":
+                asyncio.create_task(_handle_mesh_modification_ws(websocket, chat_id, payload))
+                continue
+
+            # Handle Flux inpaint requests
+            if msg_type == "inpaint.request":
+                asyncio.create_task(_handle_inpaint_ws(websocket, chat_id, payload))
                 continue
 
             # Handle RunPod requests
