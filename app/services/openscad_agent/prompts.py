@@ -68,6 +68,42 @@ Key: prongs grow FROM the band, not floating above it. Use translate to place pr
 Min thickness: 1mm band, 0.8mm prongs, 0.6mm bezel.
 """
 
+# Injected when the user uploads an image of an existing design to modify
+IMAGE_MODIFICATION_CONTEXT = """
+
+## Image-Based Design Modification
+
+An image of an existing part or design has been provided. Your job is to:
+
+### Step 1 — Reverse-engineer the design
+Carefully analyze the image and identify:
+- Overall shape and primary geometry (box, cylinder, L-bracket, enclosure, etc.)
+- Key dimensions: estimate proportions relative to each other (e.g. "length ≈ 3× width")
+- All functional features: holes, slots, flanges, ribs, tabs, threads, chamfers, fillets
+- Wall thickness, base thickness, any internal structure visible
+- Material hints (thin = sheet metal or printed; thick = cast/machined)
+
+### Step 2 — Reconstruct as parametric OpenSCAD
+Build a faithful OpenSCAD model of the EXISTING design before applying modifications:
+- One module per distinct feature (body, mounting_hole, rib, flange, etc.)
+- Named parameters for all key dimensions with realistic defaults
+- Use difference() for holes/cutouts, union() for added features, hull() for organic transitions
+- Preserve every visible feature — do not simplify away details
+
+### Step 3 — Apply the requested modification
+The user's text describes what to add, remove, or change. Apply it precisely:
+- Adding a hole: use difference() with a cylinder at the correct location
+- Adding geometry (tabs, brackets, arms): new module + union() into main()
+- Resizing a feature: change its named parameter
+- Splitting for printing: add alignment pins + matching holes at the split plane
+
+### Rules
+- If a dimension is ambiguous from the image, choose a reasonable default and expose it as a parameter
+- Preserve ALL original features unless the user explicitly asked to remove them
+- Label new additions with a comment: // ADDED: <description>
+- If you cannot confidently reconstruct a feature, approximate it with the closest primitive
+"""
+
 # Injected when user requests a 3D-printable / FDM-ready model
 FDM_PRINT_CONTEXT = """
 

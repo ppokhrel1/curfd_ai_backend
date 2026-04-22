@@ -153,7 +153,10 @@ def _extract_text_content(response) -> str:
 
 
 def _build_code_prompt(
-    user_input: str, rag_context: str = "", code_language: str = "openscad",
+    user_input: str,
+    rag_context: str = "",
+    code_language: str = "openscad",
+    has_images: bool = False,
 ) -> tuple[str, dict | None]:
     """Build the full code generation system prompt, injecting domain context if needed.
 
@@ -178,6 +181,10 @@ def _build_code_prompt(
         from app.services.openscad_agent.prompts import FDM_PRINT_CONTEXT
         prompt += FDM_PRINT_CONTEXT
         logger.info("[PROMPT] FDM 3D-printing context injected")
+    if has_images:
+        from app.services.openscad_agent.prompts import IMAGE_MODIFICATION_CONTEXT
+        prompt += IMAGE_MODIFICATION_CONTEXT
+        logger.info("[PROMPT] Image modification context injected")
     if rag_context:
         prompt += rag_context
     return prompt, experiment_meta
@@ -191,7 +198,9 @@ def _build_direct_generation_messages(
     image_data_urls: list[str] | None = None,
 ) -> tuple[list, dict | None]:
     """Build messages for direct code generation (no tools, uses CODE_PROMPT)."""
-    prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
+    prompt, experiment_meta = _build_code_prompt(
+        user_input, rag_context, code_language, has_images=bool(image_data_urls)
+    )
     human_msg = _build_human_message(user_input, image_data_urls)
     return [SystemMessage(content=prompt)] + list(history) + [human_msg], experiment_meta
 
