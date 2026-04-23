@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 import zipfile
 
@@ -202,6 +202,7 @@ async def _persist_generate_scad_asset(
     job_id: str | None,
     asset_type: str | None,
     storage_provider: str | None,
+    status_payload: dict | None = None,
 ) -> dict[str, Any] | None:
     import logging
 
@@ -248,14 +249,21 @@ async def _persist_generate_scad_asset(
             prompt = requirements_json.get("primary_function") or requirements_json.get(
                 "description_natural_language"
             )
+        finished_at = datetime.now(timezone.utc)
+        sp = status_payload or {}
+        exec_ms = sp.get("executionTime") or sp.get("execution_time") or 0
+        delay_ms = sp.get("delayTime") or sp.get("delay_time") or 0
+        total_ms = int(exec_ms) + int(delay_ms)
+        started_at = (finished_at - timedelta(milliseconds=total_ms)) if total_ms > 0 else finished_at
+
         resolved_job = JobModel(
             session_id=current_session_id,
             status="succeeded",
             prompt=prompt,
             spec_json=requirements_json,
             output_format=asset_type or "scad_zip",
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
+            started_at=started_at,
+            finished_at=finished_at,
         )
         db.add(resolved_job)
         await db.commit()
@@ -306,6 +314,7 @@ async def _persist_image_to_3d_asset(
     chat_id: str,
     output: Any,
     runpod_id: str | None,
+    status_payload: dict | None = None,
 ) -> dict[str, Any] | None:
     """Persist a generated 3D model (GLB/STL) from the image-to-3D RunPod worker."""
     import logging
@@ -331,13 +340,24 @@ async def _persist_image_to_3d_asset(
         return None
     current_session_id = chat.session_id
 
+    # Compute real timestamps from RunPod timing data if available
+    finished_at = datetime.now(timezone.utc)
+    sp = status_payload or {}
+    exec_ms = sp.get("executionTime") or sp.get("execution_time") or 0
+    delay_ms = sp.get("delayTime") or sp.get("delay_time") or 0
+    total_ms = int(exec_ms) + int(delay_ms)
+    if total_ms > 0:
+        started_at = finished_at - timedelta(milliseconds=total_ms)
+    else:
+        started_at = finished_at
+
     job = JobModel(
         session_id=current_session_id,
         status="succeeded",
         prompt="Image-to-3D generation",
         output_format="glb",
-        started_at=datetime.now(timezone.utc),
-        finished_at=datetime.now(timezone.utc),
+        started_at=started_at,
+        finished_at=finished_at,
     )
     db.add(job)
     await db.commit()
@@ -1270,6 +1290,7 @@ async def _runpod_poll_and_emit(
                                 if asset_context
                                 else None
                             ),
+                            status_payload=status_payload if isinstance(status_payload, dict) else None,
                         )
                         if asset_output is None:
                             logger.error(
@@ -1295,6 +1316,7 @@ async def _runpod_poll_and_emit(
                             chat_id=chat_id,
                             output=output,
                             runpod_id=runpod_id,
+                            status_payload=status_payload,
                         )
                         if asset_output is None:
                             logger.error("_persist_image_to_3d_asset returned None")
