@@ -7,6 +7,7 @@ from app.api.routes import (
     auth,
     chat_stream,
     chats,
+    convert,
     experiments,
     health,
     init,
@@ -45,4 +46,5 @@ api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
 api_router.include_router(experiments.router, prefix="/experiments", tags=["experiments"])
 api_router.include_router(init.router, prefix="/init", tags=["init"])
 api_router.include_router(storage_proxy.router, prefix="/storage", tags=["storage-proxy"])
+api_router.include_router(convert.router, prefix="/convert", tags=["convert"])
 
