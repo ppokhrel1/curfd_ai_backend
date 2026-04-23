@@ -1354,6 +1354,7 @@ async def _runpod_poll_and_emit(
                         "chat_id": chat_id,
                         "runpod_id": runpod_id,
                         "job_id": final_job_id,
+                        "action": action,
                         "message": _serialize_message(assistant_message),
                         "output": json_safe_output,
                     },
