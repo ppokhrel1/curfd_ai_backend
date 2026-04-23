@@ -55,6 +55,10 @@ async def proxy_storage_file(
         raise HTTPException(status_code=502, detail="B2 auth failed")
 
     bucket_name = settings.b2_bucket_name or bucket
+    # If the configured bucket overrides the URL bucket, the original "bucket"
+    # segment is actually part of the file path (e.g. "generated_models/foo.glb")
+    if settings.b2_bucket_name and bucket != settings.b2_bucket_name:
+        file_path = f"{bucket}/{file_path}"
     download_url = f"{_b2_download_url}/file/{bucket_name}/{file_path}"
 
     try:
