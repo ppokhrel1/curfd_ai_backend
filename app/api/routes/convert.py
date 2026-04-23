@@ -62,15 +62,17 @@ async def convert_to_stl(
     clean_url = url.split("?")[0]
     ext = clean_url.rsplit(".", 1)[-1].lower() if "." in clean_url else "glb"
 
-    # Load with trimesh
+    # Load with trimesh — try without force first (handles Scene GLBs)
     try:
-        loaded = trimesh.load(
-            io.BytesIO(resp.content),
-            file_type=ext,
-            force="mesh",
-        )
+        loaded = trimesh.load(io.BytesIO(resp.content), file_type=ext)
         if isinstance(loaded, trimesh.Scene):
-            loaded = trimesh.util.concatenate(loaded.dump())
+            meshes = list(loaded.dump())
+            if not meshes:
+                raise ValueError("Scene contains no meshes")
+            loaded = trimesh.util.concatenate(meshes)
+        if not isinstance(loaded, trimesh.Trimesh) or len(loaded.faces) == 0:
+            raise ValueError(f"Loaded object has no faces: {type(loaded)}")
+        logger.info(f"Loaded mesh: {len(loaded.faces)} faces, {len(loaded.vertices)} vertices")
     except Exception as e:
         logger.error(f"Failed to load mesh for conversion: {e}")
         raise HTTPException(status_code=422, detail=f"Could not parse mesh: {e}")
@@ -90,7 +92,7 @@ async def convert_to_stl(
 
     return StreamingResponse(
         io.BytesIO(stl_bytes),
-        media_type="model/stl",
+        media_type="application/octet-stream",
         headers={
             "Content-Disposition": f'attachment; filename="{stl_filename}"',
             "Content-Length": str(len(stl_bytes)),
