@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
-from app.api.routes.storage_proxy import _ensure_b2_auth, _b2_auth_token, _b2_download_url
+from app.api.routes import storage_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,8 @@ router = APIRouter()
 
 def _resolve_b2_url(url: str) -> tuple[str, dict]:
     """Resolve a B2 file URL and return (download_url, auth_headers)."""
-    _ensure_b2_auth()
-    headers = {"Authorization": _b2_auth_token}
+    storage_proxy._ensure_b2_auth()
+    headers = {"Authorization": storage_proxy._b2_auth_token}
 
     # If it's already a full B2 URL, use it directly
     if "backblazeb2.com" in url:
@@ -27,7 +27,7 @@ def _resolve_b2_url(url: str) -> tuple[str, dict]:
 
     # If it's a relative path like "generated_models/foo.glb", build the full URL
     bucket_name = settings.b2_bucket_name
-    return f"{_b2_download_url}/file/{bucket_name}/{url}", headers
+    return f"{storage_proxy._b2_download_url}/file/{bucket_name}/{url}", headers
 
 
 @router.get("/stl")
