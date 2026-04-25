@@ -697,6 +697,26 @@ async def _handle_image_to_3d_request(
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    # Download image on backend side to avoid 403s from sites that block
+    # non-browser requests (e.g. Reddit, Pinterest). Send as base64 data URL.
+    if resolved_image_url and not resolved_image_url.startswith("data:"):
+        try:
+            import httpx as _httpx
+            import base64 as _b64
+
+            async with _httpx.AsyncClient(follow_redirects=True, timeout=30.0) as _http:
+                img_resp = await _http.get(
+                    resolved_image_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                img_resp.raise_for_status()
+                ct = img_resp.headers.get("content-type", "image/png").split(";")[0]
+                b64 = _b64.b64encode(img_resp.content).decode()
+                resolved_image_url = f"data:{ct};base64,{b64}"
+                logger.info(f"Downloaded image ({len(img_resp.content)} bytes), sending as base64")
+        except Exception as dl_err:
+            logger.warning(f"Image download failed ({dl_err}), sending URL directly to RunPod")
+
     try:
         runpod_response = await client.start_raw_job({
             "action": "image_to_3d",
