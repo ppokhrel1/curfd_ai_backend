@@ -73,15 +73,15 @@ def create_app() -> FastAPI:
                     now_ts = datetime.now(timezone.utc).timestamp()
                     seconds_left = exp - now_ts
                     if 0 < seconds_left <= 600:
-                        async with SessionLocal() as db:
-                            try:
+                        try:
+                            async with SessionLocal() as db:
                                 stmt = select(RevokedToken).where(
                                     RevokedToken.token_hash == token_hash(token)
                                 )
                                 result = await db.execute(stmt)
                                 revoked = result.scalars().first()
-                            finally:
-                                await db.close()
+                        except Exception:
+                            revoked = None
                         if not revoked:
                             new_exp = datetime.fromtimestamp(exp, tz=timezone.utc) + timedelta(
                                 minutes=10

@@ -8,10 +8,10 @@ engine = create_async_engine(
     settings.database_url,
     pool_pre_ping=True,
     future=True,
-    pool_size=5,
-    max_overflow=5,
+    pool_size=10,
+    max_overflow=10,
     pool_recycle=300,
-    pool_timeout=10,
+    pool_timeout=30,
     # Supabase uses PgBouncer in transaction-pool mode (port 6543).
     # PgBouncer doesn't support asyncpg prepared statements, so disable caching.
     connect_args={"statement_cache_size": 0},
