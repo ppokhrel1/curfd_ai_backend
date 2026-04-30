@@ -40,7 +40,13 @@ def _ensure_b2_auth(force: bool = False) -> None:
     _b2_auth_token = data["authorizationToken"]
     _b2_api_url = data["apiUrl"]
     _b2_download_url = data["downloadUrl"]
-    logger.info(f"B2 storage proxy auth OK — apiUrl={_b2_api_url} downloadUrl={_b2_download_url}")
+    allowed = data.get("allowed", {})
+    logger.info(
+        f"B2 auth OK — downloadUrl={_b2_download_url} "
+        f"bucketId={allowed.get('bucketId')} "
+        f"capabilities={allowed.get('capabilities')} "
+        f"namePrefix={allowed.get('namePrefix')}"
+    )
 
 
 async def _download_from_b2(client: httpx.AsyncClient, bucket_name: str, file_path: str) -> httpx.Response:
