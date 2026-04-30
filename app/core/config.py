@@ -59,7 +59,6 @@ class Settings(BaseSettings):
     llm_model: str | None = None  # Override model name, or use provider default
     llm_temperature: float = 0.3
     anthropic_api_key: str | None = None
-    openai_api_key: str | None = None
 
     # Agent configuration
     agent_max_iterations: int = 5

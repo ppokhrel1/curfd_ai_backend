@@ -77,7 +77,7 @@ def _get_components(provider: str | None = None, model: str | None = None, think
     resolved_provider = (provider or settings.llm_provider).lower()
     llm = get_llm(provider, model, thinking)
 
-    tools_supported = resolved_provider in ("anthropic", "openai", "gemini", "groq")
+    tools_supported = resolved_provider in ("anthropic", "gemini", "groq")
     llm_with_tools = llm.bind_tools(_tools) if tools_supported else None
 
     return {
