@@ -18,9 +18,9 @@ _b2_auth_token: str | None = None
 _b2_download_url: str | None = None
 
 
-def _ensure_b2_auth() -> None:
+def _ensure_b2_auth(force: bool = False) -> None:
     global _b2_auth_token, _b2_download_url
-    if _b2_auth_token:
+    if _b2_auth_token and not force:
         return
     key_id = settings.b2_key_id
     app_key = settings.b2_application_key
@@ -68,6 +68,15 @@ async def proxy_storage_file(
                 headers={"Authorization": _b2_auth_token},
                 follow_redirects=True,
             )
+            # B2 token expired — re-auth and retry once
+            if resp.status_code == 401:
+                _ensure_b2_auth(force=True)
+                download_url = f"{_b2_download_url}/file/{bucket_name}/{file_path}"
+                resp = await client.get(
+                    download_url,
+                    headers={"Authorization": _b2_auth_token},
+                    follow_redirects=True,
+                )
             resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         logger.error(f"B2 fetch error {exc.response.status_code}: {download_url}")
