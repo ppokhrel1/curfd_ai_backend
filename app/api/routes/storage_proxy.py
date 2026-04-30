@@ -60,6 +60,21 @@ async def _download_from_b2(client: httpx.AsyncClient, bucket_name: str, file_pa
     return resp
 
 
+@router.get("/debug/b2-auth")
+async def debug_b2_auth():
+    """Temporary debug endpoint to verify B2 credentials and capabilities."""
+    try:
+        _ensure_b2_auth(force=True)
+    except HTTPException as e:
+        return {"error": str(e.detail), "status": "auth_failed"}
+    return {
+        "status": "ok",
+        "download_url": _b2_download_url,
+        "has_token": bool(_b2_auth_token),
+        "token_prefix": _b2_auth_token[:20] + "..." if _b2_auth_token else None,
+    }
+
+
 @router.get("/{bucket}/{file_path:path}")
 async def proxy_storage_file(
     bucket: str = Path(...),
