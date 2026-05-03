@@ -58,9 +58,15 @@ def _to_single_trimesh(loaded) -> trimesh.base.Trimesh:
 
 
 def _repair_pymeshfix(mesh: trimesh.base.Trimesh) -> trimesh.base.Trimesh:
+    import numpy as np
     import pymeshfix
-    v, f = pymeshfix.clean_from_arrays(mesh.vertices, mesh.faces)
-    return trimesh.Trimesh(vertices=v, faces=f, process=False)
+    # pymeshfix's nanobind binding is strict about dtype + ownership: it
+    # rejects trimesh.caching.TrackedArray subclasses with the wrong dtype.
+    # Cast explicitly to the expected (float64, int32) plain ndarrays.
+    v = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
+    f = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+    v_out, f_out = pymeshfix.clean_from_arrays(v, f)
+    return trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
 
 
 def _repair_trimesh(mesh: trimesh.base.Trimesh) -> trimesh.base.Trimesh:
