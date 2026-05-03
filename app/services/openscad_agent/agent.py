@@ -86,6 +86,7 @@ def _get_components(provider: str | None = None, model: str | None = None, think
         "llm_with_tools": llm_with_tools,
         "tools_supported": tools_supported,
         "provider": resolved_provider,
+        "thinking": thinking,
     }
 
 
@@ -108,12 +109,23 @@ class CodeGenResult(BaseModel):
 
 
 def _get_structured_llm(components: dict):
-    """Wrap the code LLM with structured output for deterministic extraction."""
+    """Wrap the code LLM with structured output for deterministic extraction.
+
+    Anthropic API rule: when extended thinking is enabled, tool_choice
+    can't force tool use. LangChain's `with_structured_output(method=
+    'json_schema')` and `'function_calling'` both internally set a
+    forced tool_choice, so they raise 400 with thinking on. The only
+    Anthropic-compatible method when thinking is on is `json_mode`,
+    which prompts the model to emit JSON without using tool calls.
+    """
     llm = components["code_llm"]
     provider = components["provider"]
-    # Anthropic needs json_schema method for thinking mode compatibility
+    thinking = bool(components.get("thinking", False))
+
     if provider == "anthropic":
-        method = "json_schema"
+        # json_schema forces tool_choice → 400 when thinking is on.
+        # Fall back to json_mode (prompt-instructed JSON, no tool_choice).
+        method = "json_mode" if thinking else "json_schema"
     elif provider == "gemini":
         method = "json_mode"
     else:
