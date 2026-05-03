@@ -19,6 +19,7 @@ from app.api.routes import (
     sessions,
     cadquery,
     gemini_openscad_generate_route,
+    mesh_fill,
     openscad,
     storage_proxy,
     uploads,
@@ -47,4 +48,5 @@ api_router.include_router(experiments.router, prefix="/experiments", tags=["expe
 api_router.include_router(init.router, prefix="/init", tags=["init"])
 api_router.include_router(storage_proxy.router, prefix="/storage", tags=["storage-proxy"])
 api_router.include_router(convert.router, prefix="/convert", tags=["convert"])
+api_router.include_router(mesh_fill.router, prefix="/mesh", tags=["mesh-fill"])
 
