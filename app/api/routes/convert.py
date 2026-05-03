@@ -3,59 +3,31 @@
 import io
 import logging
 
-import httpx
 import trimesh
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from app.core.config import settings
-from app.api.routes import storage_proxy
+from app.api.routes.storage_proxy import fetch_object_bytes
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _resolve_b2_url(url: str) -> tuple[str, dict]:
-    """Resolve a B2 file URL and return (download_url, auth_headers)."""
-    storage_proxy._ensure_b2_auth()
-    headers = {"Authorization": storage_proxy._b2_auth_token}
-
-    # If it's already a full B2 URL, use it directly
-    if "backblazeb2.com" in url:
-        return url, headers
-
-    # If it's a relative path like "generated_models/foo.glb", build the full URL
-    bucket_name = settings.b2_bucket_name
-    return f"{storage_proxy._b2_download_url}/file/{bucket_name}/{url}", headers
-
-
 @router.get("/stl")
 async def convert_to_stl(
-    url: str = Query(..., description="B2 URL or path of the GLB/OBJ file to convert"),
+    url: str = Query(..., description="Storage URL or path of the GLB/OBJ file to convert"),
 ):
-    """Download a mesh from B2, convert to STL, and stream it back.
+    """Download a mesh from storage, convert to STL, and stream it back.
 
     Use this to get slicer-compatible files (Anycubic, Cura, PrusaSlicer).
     """
-    # Resolve URL
     try:
-        download_url, headers = _resolve_b2_url(url)
+        source_bytes, _ = await fetch_object_bytes(url)
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"B2 auth failed for conversion: {e}")
-        raise HTTPException(status_code=502, detail="Storage auth failed")
-
-    # Download the mesh
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.get(download_url, headers=headers, follow_redirects=True)
-            resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail="Source file not found")
     except Exception as exc:
-        logger.error(f"Failed to download mesh for conversion: {exc}")
+        logger.error(f"Failed to fetch source file for conversion: {exc}")
         raise HTTPException(status_code=502, detail="Failed to download source file")
 
     # Detect format from URL
@@ -64,7 +36,7 @@ async def convert_to_stl(
 
     # Load with trimesh — try without force first (handles Scene GLBs)
     try:
-        loaded = trimesh.load(io.BytesIO(resp.content), file_type=ext)
+        loaded = trimesh.load(io.BytesIO(source_bytes), file_type=ext)
         if isinstance(loaded, trimesh.Scene):
             meshes = list(loaded.dump())
             if not meshes:

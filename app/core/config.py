@@ -78,11 +78,19 @@ class Settings(BaseSettings):
     image_to_3d_runpod_api_token: str | None = None  # Falls back to runpod_api_token
     image_to_3d_timeout_seconds: int = 600
 
-    # Backblaze B2 object storage
+    # Backblaze B2 object storage (legacy — kept for fallback during R2 migration)
     b2_key_id: str | None = None
     b2_application_key: str | None = None
     b2_bucket_name: str | None = None
     b2_bucket_id: str | None = None
+
+    # Cloudflare R2 object storage (S3-compatible). When configured, the
+    # storage proxy reads R2 first and falls back to B2 on miss; uploads
+    # written by the worker go to R2.
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket_name: str | None = None  # e.g. "nooriat-models"
 
 
 settings = Settings()
