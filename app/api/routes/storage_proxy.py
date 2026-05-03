@@ -181,7 +181,7 @@ async def debug_storage():
     }
 
 
-@router.get("/{bucket}/{file_path:path}")
+@router.api_route("/{bucket}/{file_path:path}", methods=["GET", "HEAD"])
 async def proxy_storage_file(
     bucket: str = Path(...),
     file_path: str = Path(...),
