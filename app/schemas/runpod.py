@@ -27,6 +27,9 @@ class ImageTo3DRequest(BaseModel):
     image_url: str | None = None  # Base64 data URL or HTTPS URL; optional when prompt is provided
     prompt: str = ""
     output_format: Literal["glb", "stl"] = "glb"
+    # When true the worker skips Hunyuan3D-Part decomposition and returns
+    # mesh-only (~5-10s faster). Default: produce parts.
+    skip_segmentation: bool = False
 
 
 class ImageTo3DResponse(BaseModel):
