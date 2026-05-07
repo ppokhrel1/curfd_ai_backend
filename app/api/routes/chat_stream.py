@@ -724,6 +724,7 @@ async def _handle_image_to_3d_request(
             "prompt": payload.prompt,
             "output_format": payload.output_format,
             "skip_segmentation": payload.skip_segmentation,
+            "with_texture": payload.with_texture,
         })
         logger.info(f"Image-to-3D RunPod job submitted: {runpod_response.get('id')}")
     except Exception as exc:
@@ -957,6 +958,7 @@ async def _handle_image_selected_ws(
     prompt: str,
     output_format: str,
     skip_segmentation: bool = False,
+    with_texture: bool = False,
 ) -> None:
     """Start 3D generation with the user-selected image URL.
 
@@ -977,6 +979,7 @@ async def _handle_image_selected_ws(
                     prompt=prompt,
                     output_format=output_format,
                     skip_segmentation=skip_segmentation,
+                    with_texture=with_texture,
                 ),
                 db=db,
             )
@@ -1806,10 +1809,11 @@ async def chat_socket(
                 prompt = payload.get("prompt", "")
                 output_format = payload.get("output_format", "glb")
                 skip_segmentation = bool(payload.get("skip_segmentation", False))
+                with_texture = bool(payload.get("with_texture", False))
                 if selected_url:
                     asyncio.create_task(_handle_image_selected_ws(
                         websocket, chat_id, selected_url, prompt, output_format,
-                        skip_segmentation,
+                        skip_segmentation, with_texture,
                     ))
                 continue
 

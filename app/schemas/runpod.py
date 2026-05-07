@@ -30,6 +30,9 @@ class ImageTo3DRequest(BaseModel):
     # When true the worker skips Hunyuan3D-Part decomposition and returns
     # mesh-only (~5-10s faster). Default: produce parts.
     skip_segmentation: bool = False
+    # When true the worker also runs Hunyuan3D-Paint to apply UV-mapped
+    # textures to the mesh — adds ~30-90s per request and ~12-16 GB VRAM.
+    with_texture: bool = False
 
 
 class ImageTo3DResponse(BaseModel):
