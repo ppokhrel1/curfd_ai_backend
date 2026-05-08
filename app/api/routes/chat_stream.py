@@ -363,6 +363,13 @@ async def _persist_image_to_3d_asset(
     await db.commit()
     await db.refresh(job)
 
+    # When the worker ran Hunyuan3D-Paint (with_texture=true) the
+    # response also carries `textured_url` — a UV-mapped GLB sibling
+    # of the plain mesh. We persist it alongside `model_url` so the
+    # frontend can offer both: the plain mesh for fast preview /
+    # geometry edits, and the textured one for final render.
+    textured_url = data.get("textured_url")
+
     # Create parent asset
     asset = AssetModel(
         job_id=job.id,
@@ -372,9 +379,25 @@ async def _persist_image_to_3d_asset(
         metadata_json={
             "runpod_id": runpod_id,
             "model_url": model_url,
+            "textured_url": textured_url,
         },
     )
     db.add(asset)
+
+    # Sibling asset row for the textured variant (separate row so it
+    # has its own lifecycle / can be queried independently).
+    if textured_url:
+        textured_asset = AssetModel(
+            job_id=job.id,
+            asset_type="image_to_3d_textured_glb",
+            uri=textured_url,
+            storage_provider="runpod",
+            metadata_json={
+                "runpod_id": runpod_id,
+                "parent_model_url": model_url,
+            },
+        )
+        db.add(textured_asset)
 
     # Create child assets for parts if available
     parts = data.get("parts", [])
@@ -423,6 +446,8 @@ async def _persist_image_to_3d_asset(
     result = _serialize_asset(asset)
     if persisted_parts:
         result["parts"] = persisted_parts
+    if textured_url:
+        result["textured_url"] = textured_url
     return result
 
 
