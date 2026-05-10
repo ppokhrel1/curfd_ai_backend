@@ -64,6 +64,31 @@ def _serialize_message(message: MessageModel) -> dict[str, Any]:
     return MessageRead.model_validate(message).model_dump(mode="json")
 
 
+# Maximum string length we'll print into a log. Anything longer (data: URLs,
+# raw base64 payloads echoed back by RunPod) gets collapsed to a marker so
+# the worker output doesn't dump multi-MB blobs into the log file.
+_MAX_LOGGED_STRING = 200
+
+
+def _redact_for_log(value: Any) -> Any:
+    """Recursively shorten data: URLs and oversized strings inside a payload
+    before it goes to the logger. Used for RunPod status payloads, which
+    echo the input image_url verbatim — for the nano-banana custom flow
+    that's a multi-MB base64 string."""
+    if isinstance(value, str):
+        if value.startswith("data:"):
+            head, _, _ = value.partition(",")
+            return f"<{head} elided, {len(value)} chars>"
+        if len(value) > _MAX_LOGGED_STRING:
+            return f"{value[:_MAX_LOGGED_STRING]}…<+{len(value) - _MAX_LOGGED_STRING} chars>"
+        return value
+    if isinstance(value, dict):
+        return {k: _redact_for_log(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_redact_for_log(v) for v in value)
+    return value
+
+
 def _normalize_action(action: str) -> str:
     if action == "process_scad":
         return "generate_scad"
@@ -976,6 +1001,174 @@ async def _handle_inpaint_ws(
         })
 
 
+def _gen_candidate_via_gemini(
+    contents,
+    purpose: str,
+) -> tuple[str | None, str | None, str]:
+    """Run Gemini, upload R2, return (display_url, runpod_url, error).
+
+    `display_url` is what the picker should render (R2 if available, else
+    data URL). `runpod_url` is always a data URL — the worker decodes it
+    inline so we never have to expose private R2 to RunPod. `error` is a
+    user-friendly string when generation failed, otherwise empty."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from app.services.openscad_agent.tools.image_gen import (
+        _bytes_to_data_url,
+        _client,
+        _extract_image_bytes,
+        _generate_with_fallback,
+        _refusal_summary,
+        _upload_to_r2,
+    )
+
+    try:
+        client = _client()
+        response, _model_used = _generate_with_fallback(client, contents)
+    except Exception as e:
+        logger.error(f"[i2i {purpose}] Gemini call failed: {e}")
+        return None, None, f"Image generation failed: {e}"
+
+    extracted = _extract_image_bytes(response)
+    if not extracted:
+        reason = _refusal_summary(response)
+        logger.warning(f"[i2i {purpose}] No image in Gemini response ({reason})")
+        return None, None, f"Gemini didn't return an image ({reason}). Try rephrasing."
+
+    image_bytes, media_type = extracted
+    public_url = _upload_to_r2(image_bytes, media_type)
+    data_url = _bytes_to_data_url(image_bytes, media_type)
+    display_url = public_url or data_url
+    logger.info(
+        f"[i2i {purpose}] candidate ready ({len(image_bytes)} bytes, "
+        f"chat={'r2' if public_url else 'data-url'})"
+    )
+    return display_url, data_url, ""
+
+
+async def _handle_generate_custom_image_ws(
+    websocket: WebSocket,
+    chat_id: str,
+    custom_prompt: str,
+    request_id: str,
+) -> None:
+    """Picker action: user wants a custom reference image. Generate via
+    Gemini, surface the result back to the picker as a candidate. Does NOT
+    trigger RunPod — the user must click "Use for 3D" to commit."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not custom_prompt or not custom_prompt.strip():
+        await websocket.send_json({
+            "type": "image_to_3d.candidate_error",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "message": "Description required to generate a custom image.",
+        })
+        return
+
+    await websocket.send_json({
+        "type": "image_to_3d.candidate_pending",
+        "chat_id": chat_id,
+        "request_id": request_id,
+        "action": "generate",
+    })
+
+    display_url, runpod_url, err = _gen_candidate_via_gemini(custom_prompt, "generate")
+    if err or not display_url:
+        await websocket.send_json({
+            "type": "image_to_3d.candidate_error",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "message": err or "Generation failed",
+        })
+        return
+
+    await websocket.send_json({
+        "type": "image_to_3d.candidate_ready",
+        "chat_id": chat_id,
+        "request_id": request_id,
+        "display_url": display_url,
+        "runpod_url": runpod_url,
+        "source": "ai_generated",
+        "prompt": custom_prompt,
+    })
+
+
+async def _handle_edit_candidate_ws(
+    websocket: WebSocket,
+    chat_id: str,
+    request_id: str,
+    image_url: str,
+    edit_prompt: str,
+) -> None:
+    """Picker action: refine the current candidate with a Gemini edit.
+    Returns a new candidate; user can keep iterating before committing."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not edit_prompt or not edit_prompt.strip():
+        await websocket.send_json({
+            "type": "image_to_3d.candidate_error",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "message": "Describe the change you want to apply.",
+        })
+        return
+    if not image_url:
+        await websocket.send_json({
+            "type": "image_to_3d.candidate_error",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "message": "No image to edit.",
+        })
+        return
+
+    # Load the current image into a PIL.Image so Gemini can use it as a
+    # multimodal reference. Helper handles both data: and http(s) sources.
+    from app.services.openscad_agent.tools.image_gen import _load_reference_image
+    try:
+        ref_image = _load_reference_image(image_url)
+    except Exception as e:
+        await websocket.send_json({
+            "type": "image_to_3d.candidate_error",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "message": f"Could not load source image: {e}",
+        })
+        return
+
+    await websocket.send_json({
+        "type": "image_to_3d.candidate_pending",
+        "chat_id": chat_id,
+        "request_id": request_id,
+        "action": "edit",
+    })
+
+    display_url, runpod_url, err = _gen_candidate_via_gemini(
+        [edit_prompt, ref_image], "edit"
+    )
+    if err or not display_url:
+        await websocket.send_json({
+            "type": "image_to_3d.candidate_error",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "message": err or "Edit failed",
+        })
+        return
+
+    await websocket.send_json({
+        "type": "image_to_3d.candidate_ready",
+        "chat_id": chat_id,
+        "request_id": request_id,
+        "display_url": display_url,
+        "runpod_url": runpod_url,
+        "source": "ai_edited",
+        "prompt": edit_prompt,
+    })
+
+
 async def _handle_image_selected_ws(
     websocket: WebSocket,
     chat_id: str,
@@ -1312,7 +1505,7 @@ async def _runpod_poll_and_emit(
 
             output = status_payload.get("output")
             logger.info(f"RunPod COMPLETED for runpod_id={runpod_id}, action={action}")
-            logger.info(f"Status payload: {status_payload}")
+            logger.info(f"Status payload: {_redact_for_log(status_payload)}")
 
             async with SessionLocal() as db:
                 if action == "generate_scad":
@@ -1428,6 +1621,11 @@ async def _runpod_poll_and_emit(
                         "runpod_id": runpod_id,
                         "job_id": final_job_id,
                         "action": action,
+                        # Frontend's handleJobCompletion gates asset extraction
+                        # on `event.status === "COMPLETED"`. Without this field,
+                        # the model URL is never pulled out of `output` and
+                        # the chat never renders the generated mesh.
+                        "status": status_value or "COMPLETED",
                         "message": _serialize_message(assistant_message),
                         "output": json_safe_output,
                     },
@@ -1441,7 +1639,10 @@ async def _runpod_poll_and_emit(
 
             logger.error(f" RunPod job FAILED: {runpod_id}")
             logger.error(f"Status: {status_value}")
-            logger.error(f"Full status payload: {json.dumps(status_payload, indent=2)}")
+            logger.error(
+                f"Full status payload: "
+                f"{json.dumps(_redact_for_log(status_payload), indent=2)}"
+            )
 
             error_detail = (
                 status_payload.get("error")
@@ -1689,13 +1890,58 @@ async def _handle_openscad_ws(
                 elif event["type"] == "image.generated":
                     # Surface a Gemini-generated/edited image inline in chat.
                     img_data = event.get("data", {})
+                    img_url = img_data.get("url") or ""
+                    img_prompt = (img_data.get("prompt") or "").strip()
+                    img_tool = img_data.get("tool")
+
+                    # Persist a row so the image survives reload. The chat
+                    # loader (chatService.ts) reads metadata_json.images
+                    # and surfaces them as message.imageUrls. Only persist
+                    # when the URL is durable — http(s) (R2) or a data:
+                    # URL the browser can decode standalone. Skipping the
+                    # write entirely if the URL is empty avoids creating
+                    # ghost messages.
+                    if img_url:
+                        action = "Edited" if img_tool == "edit_image" else "Generated"
+                        caption = (
+                            f"{action}: {img_prompt}" if img_prompt else f"{action} image"
+                        )
+                        try:
+                            async with SessionLocal() as _img_db:
+                                img_msg = MessageModel(
+                                    chat_id=chat_id,
+                                    role="assistant",
+                                    content=caption,
+                                    metadata_json={
+                                        "images": [img_url],
+                                        "generated_image": True,
+                                        "tool": img_tool,
+                                        "prompt": img_prompt,
+                                    },
+                                )
+                                _img_db.add(img_msg)
+                                await _img_db.commit()
+                                await _img_db.refresh(img_msg)
+                                # Tag the WS event with the persisted id so
+                                # the frontend can dedupe the optimistic
+                                # client-side row against the server one.
+                                img_data = {
+                                    **img_data,
+                                    "message_id": str(img_msg.id),
+                                }
+                        except Exception as exc:
+                            logger.exception(
+                                f"Failed to persist generated-image message: {exc}"
+                            )
+
                     await websocket.send_json({
                         "type": "image.generated",
                         "chat_id": chat_id,
-                        "url": img_data.get("url"),
-                        "prompt": img_data.get("prompt", ""),
-                        "tool": img_data.get("tool"),
+                        "url": img_url,
+                        "prompt": img_prompt,
+                        "tool": img_tool,
                         "source_image_url": img_data.get("source_image_url"),
+                        "message_id": img_data.get("message_id"),
                     })
                 elif event["type"] == "done":
                     final_data = event["data"]
@@ -1850,6 +2096,29 @@ async def chat_socket(
                     asyncio.create_task(_handle_image_selected_ws(
                         websocket, chat_id, selected_url, prompt, output_format,
                         skip_segmentation, with_texture,
+                    ))
+                continue
+
+            # Picker action: generate a fresh candidate image via nano banana.
+            # Returns it back to the picker; the user has to click "Use for 3D"
+            # to actually trigger RunPod via image_to_3d.image_selected.
+            if msg_type == "image_to_3d.generate_custom":
+                custom_prompt = (payload.get("prompt") or "").strip()
+                request_id = payload.get("request_id") or ""
+                if custom_prompt:
+                    asyncio.create_task(_handle_generate_custom_image_ws(
+                        websocket, chat_id, custom_prompt, request_id,
+                    ))
+                continue
+
+            # Picker action: refine the current candidate via Gemini edit.
+            if msg_type == "image_to_3d.edit_candidate":
+                edit_prompt = (payload.get("prompt") or "").strip()
+                image_url = payload.get("image_url") or ""
+                request_id = payload.get("request_id") or ""
+                if edit_prompt and image_url:
+                    asyncio.create_task(_handle_edit_candidate_ws(
+                        websocket, chat_id, request_id, image_url, edit_prompt,
                     ))
                 continue
 

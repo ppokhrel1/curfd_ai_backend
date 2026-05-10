@@ -432,6 +432,14 @@ async def _run_tool_loop(
                 if tool_fn is None:
                     tool_result = f"Unknown tool: {tool_name}"
                 else:
+                    # Auto-inject the attached image into edit_image when the
+                    # LLM didn't fill image_url itself.
+                    if (
+                        tool_name == "edit_image"
+                        and image_data_urls
+                        and not tool_args.get("image_url")
+                    ):
+                        tool_args = {**tool_args, "image_url": image_data_urls[-1]}
                     try:
                         tool_result = await tool_fn.ainvoke(tool_args)
                     except Exception as e:
@@ -807,9 +815,12 @@ async def run_agent_stream(
 
     human_msg = _build_human_message(user_input, image_data_urls)
 
+    # Use the tool loop whenever the provider supports tools — even when the
+    # user attached an image. Routing for that case (image-to-3D-mesh vs.
+    # image-edit vs. CAD-from-image) is now decided by the LLM via the
+    # AGENT_PROMPT rules instead of being hard-gated here.
     use_tools = (
-        not image_data_urls
-        and c["tools_supported"]
+        c["tools_supported"]
         and c["llm_with_tools"] is not None
     )
 
@@ -1012,6 +1023,16 @@ async def run_agent_stream(
                 # Execute other tools (e.g. search_reference_images)
                 tool_fn = _tools_by_name.get(tool_name)
                 if tool_fn:
+                    # Auto-inject the attached image into edit_image when the
+                    # LLM didn't pick up a URL itself. Multimodal models see
+                    # the image but can't always echo the URL string back as
+                    # a tool argument.
+                    if (
+                        tool_name == "edit_image"
+                        and image_data_urls
+                        and not tool_args.get("image_url")
+                    ):
+                        tool_args = {**tool_args, "image_url": image_data_urls[-1]}
                     try:
                         tool_result = await tool_fn.ainvoke(tool_args)
                     except Exception as e:

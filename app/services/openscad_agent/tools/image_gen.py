@@ -29,8 +29,60 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Single image-capable Gemini model. If Google ships a newer one, swap here.
-_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image-preview")
+# Image-capable Gemini models. Naming has churned: the original "nano
+# banana" preview was `gemini-2.5-flash-image-preview`; some accounts /
+# regions / API versions only expose the GA name `gemini-2.5-flash-image`,
+# and the older v2 preview is still common. We try the user-configured one
+# first, then fall back to known siblings on 404 so a regional naming
+# change doesn't break the tool. Override with GEMINI_IMAGE_MODEL.
+_DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image"
+_PRIMARY_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", _DEFAULT_IMAGE_MODEL)
+_IMAGE_MODEL_FALLBACKS = [
+    "gemini-2.5-flash-image",
+    "gemini-2.5-flash-image-preview",
+    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.0-flash-exp-image-generation",
+]
+
+
+def _candidate_models() -> list[str]:
+    """Configured model first, then fallbacks (de-duplicated, order preserved)."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in [_PRIMARY_IMAGE_MODEL, *_IMAGE_MODEL_FALLBACKS]:
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _is_model_404(exc: Exception) -> bool:
+    """Detect a 404 NOT_FOUND from google-genai for an unknown model name."""
+    msg = str(exc).lower()
+    return ("404" in msg or "not_found" in msg) and "model" in msg
+
+
+def _generate_with_fallback(client, contents) -> tuple[object, str]:
+    """Call generate_content trying each candidate model in order.
+
+    Returns (response, model_used). Raises the last exception if every
+    candidate fails. Failures other than 404-not-found re-raise immediately,
+    since a quota/safety/network error won't be fixed by switching model."""
+    last_exc: Exception | None = None
+    for model in _candidate_models():
+        try:
+            response = client.models.generate_content(model=model, contents=contents)
+            if model != _PRIMARY_IMAGE_MODEL:
+                logger.info(
+                    f"[image_gen] Primary model unavailable; succeeded with {model!r}"
+                )
+            return response, model
+        except Exception as exc:
+            if not _is_model_404(exc):
+                raise
+            logger.info(f"[image_gen] {model!r} 404, trying next candidate")
+            last_exc = exc
+    raise last_exc or RuntimeError("No image-capable Gemini model is reachable")
 
 
 def _upload_to_r2(image_bytes: bytes, media_type: str) -> str | None:
@@ -105,6 +157,63 @@ def _extract_image_bytes(response) -> tuple[bytes, str] | None:
     except Exception as e:
         logger.warning(f"[image_gen] Failed to extract image bytes: {e}")
     return None
+
+
+def _extract_text_commentary(response) -> str:
+    """Pull text parts out of a genai response. The model often returns a
+    short explanation alongside the image (e.g. why it refused, or what it
+    chose to render). Surface this so the agent can pass it to the user.
+    """
+    fragments: list[str] = []
+    try:
+        for cand in getattr(response, "candidates", []) or []:
+            content = getattr(cand, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []) or []:
+                txt = getattr(part, "text", None)
+                if txt:
+                    fragments.append(txt)
+    except Exception:
+        pass
+    return " ".join(f.strip() for f in fragments if f.strip())
+
+
+def _refusal_summary(response) -> str:
+    """Best-effort string describing why the model returned no image —
+    finish_reason, safety filter category, etc."""
+    bits: list[str] = []
+    try:
+        for cand in getattr(response, "candidates", []) or []:
+            fr = getattr(cand, "finish_reason", None)
+            if fr:
+                bits.append(f"finish_reason={fr}")
+            for sr in getattr(cand, "safety_ratings", []) or []:
+                bits.append(
+                    f"{getattr(sr, 'category', '?')}={getattr(sr, 'probability', '?')}"
+                )
+    except Exception:
+        pass
+    return ", ".join(str(b) for b in bits) or "no metadata"
+
+
+# Allowed values per Gemini Image API.
+_VALID_ASPECTS = {"1:1", "3:4", "4:3", "9:16", "16:9"}
+
+
+def _compose_prompt(prompt: str, aspect_ratio: Optional[str]) -> str:
+    """Inject an aspect-ratio hint into the prompt — gemini-2.5-flash-image
+    honors natural-language sizing instructions reliably."""
+    if not aspect_ratio:
+        return prompt
+    aspect_ratio = aspect_ratio.strip()
+    if aspect_ratio not in _VALID_ASPECTS:
+        logger.info(
+            f"[image_gen] Ignoring unsupported aspect_ratio={aspect_ratio!r}; "
+            f"valid: {sorted(_VALID_ASPECTS)}"
+        )
+        return prompt
+    return f"{prompt}\n\nAspect ratio: {aspect_ratio}"
 
 
 def _bytes_to_data_url(image_bytes: bytes, media_type: str) -> str:
@@ -183,10 +292,7 @@ def generate_image(prompt: str) -> str:
         return "generate_image error: prompt is empty."
     try:
         client = _client()
-        response = client.models.generate_content(
-            model=_IMAGE_MODEL,
-            contents=prompt,
-        )
+        response, _model_used = _generate_with_fallback(client, prompt)
     except Exception as e:
         logger.error(f"[image_gen] Gemini generate_content failed: {e}")
         return f"Image generation failed: {e}"
@@ -234,10 +340,7 @@ def edit_image(image_url: str, prompt: str) -> str:
 
     try:
         client = _client()
-        response = client.models.generate_content(
-            model=_IMAGE_MODEL,
-            contents=[prompt, ref_image],
-        )
+        response, _model_used = _generate_with_fallback(client, [prompt, ref_image])
     except Exception as e:
         logger.error(f"[image_gen] Gemini edit failed: {e}")
         return f"Image edit failed: {e}"
