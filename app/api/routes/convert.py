@@ -123,7 +123,15 @@ def _make_print_ready(
 @router.get("/stl")
 async def convert_to_stl(
     url: str = Query(..., description="Storage URL or path of the GLB/OBJ file to convert"),
-    repair: bool = Query(True, description="Run trimesh fill_holes + fix_normals (slicer-safety)"),
+    repair: bool = Query(
+        False,
+        description="Run trimesh fill_holes + fix_normals. OFF by default "
+        "— upstream Hunyuan3D output is already smoothed/cleaned, and "
+        "trimesh.fill_holes can catastrophically over-triangulate large "
+        "concavities on AI meshes, blob-ifying the silhouette. Use the "
+        "separate 'Fill for printing' button (pymeshfix path) for "
+        "serious repair.",
+    ),
     center: bool = Query(True, description="Re-centre at origin, seat on z=0"),
     target_size_mm: float | None = Query(
         80.0,
@@ -134,11 +142,13 @@ async def convert_to_stl(
         "with margin). Pass 0 to skip scaling.",
     ),
     decimate_to: int | None = Query(
-        200_000,
+        None,
         ge=10_000,
         le=2_000_000,
         description="Cap face count via fast_simplification before export. "
-        "200k is more than enough for FDM printing.",
+        "None (default) preserves source detail — STL files at 600k-800k "
+        "faces still slice quickly. Pass an integer only if you actually "
+        "need to shrink the file.",
     ),
     fmt: str = Query("stl", description="Output format: 'stl' or '3mf'"),
 ):
