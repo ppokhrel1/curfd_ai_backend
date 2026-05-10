@@ -28,7 +28,15 @@ router = APIRouter()
 
 class FillMeshRequest(BaseModel):
     url: str  # source mesh URL (anywhere fetch_object_bytes can resolve)
-    method: str = "auto"  # "auto" | "pymeshfix" | "trimesh"
+    # Default flipped from "auto" → "trimesh" after pymeshfix was
+    # observed shredding AI meshes down to a flat blob (it assumes the
+    # input is one closed manifold, discards everything that isn't
+    # connected to its "main" component, then re-seals — for a Hunyuan
+    # mesh with limbs/accessories this annihilates the model). trimesh's
+    # fill_holes is conservative: only fills small triangulated gaps,
+    # leaves topology alone. Users who actually want pymeshfix's
+    # aggressive reconstruction can pass method="pymeshfix" explicitly.
+    method: str = "trimesh"  # "auto" | "pymeshfix" | "trimesh"
 
 
 class FillMeshResponse(BaseModel):
