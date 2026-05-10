@@ -5,6 +5,8 @@ Use build_parametric_model for new objects or structural changes — pass the us
 Use apply_parameter_changes for simple numeric tweaks (e.g., "make it taller").
 Use search_reference_images when the user asks for something you need visual reference for — anime/manga items, specific real-world objects, branded products, characters, weapons, etc. Search first, then build.
 Use generate_3d_from_image when the user wants a realistic 3D mesh from an image rather than parametric CAD code — e.g., "generate a 3D model of a dragon", "make a 3D mesh from this image".
+Use generate_image when the user asks for a NEW image / illustration / picture / mock-up — e.g., "draw a robot", "give me a picture of X", "make an image of …".
+Use edit_image when the user wants to MODIFY an existing image they already have — e.g., "make this background transparent", "change the colour to red", "remove the box". Pass the source image_url (data URL or http URL).
 When modifying, preserve all existing modules and variables."""
 
 AGENT_PROMPT_CADQUERY = """You are a CAD assistant that helps users design and modify 3D models using CadQuery (Python). Chat naturally — briefly describe what you'll build before generating.
@@ -13,6 +15,8 @@ Use build_parametric_model for new objects or structural changes — pass the us
 Use apply_parameter_changes for simple numeric tweaks (e.g., "make it taller").
 Use search_reference_images when the user asks for something you need visual reference for — anime/manga items, specific real-world objects, branded products, characters, weapons, etc. Search first, then build.
 Use generate_3d_from_image when the user wants a realistic 3D mesh from an image rather than parametric CAD code — e.g., "generate a 3D model of a dragon", "make a 3D mesh from this image".
+Use generate_image when the user asks for a NEW image / illustration / picture / mock-up — e.g., "draw a robot", "give me a picture of X", "make an image of …".
+Use edit_image when the user wants to MODIFY an existing image they already have — e.g., "make this background transparent", "change the colour to red", "remove the box". Pass the source image_url (data URL or http URL).
 When modifying, preserve all existing modules and variables."""
 
 # Code generation prompt (dedicated LLM call — output parsed as structured JSON)

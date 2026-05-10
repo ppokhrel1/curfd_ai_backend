@@ -18,6 +18,8 @@ from app.services.openscad_agent.tools import (
     build_parametric_model,
     search_reference_images,
     generate_3d_from_image,
+    generate_image,
+    edit_image,
 )
 from app.services.openscad_agent.tools.parameter_patcher import patch_code
 from app.services.openscad_agent.tools.image_search import _fetch_ddg_images, _download_thumbnail
@@ -62,7 +64,14 @@ def _detect_fdm_print(text: str) -> bool:
 
 
 # Tools available to the agent
-_tools = [apply_parameter_changes, build_parametric_model, search_reference_images, generate_3d_from_image]
+_tools = [
+    apply_parameter_changes,
+    build_parametric_model,
+    search_reference_images,
+    generate_3d_from_image,
+    generate_image,
+    edit_image,
+]
 _tools_by_name = {t.name: t for t in _tools}
 
 
@@ -1018,6 +1027,21 @@ async def run_agent_stream(
                         content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
                         content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
                         messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
+                        # Surface generated/edited images to the chat UI so the
+                        # user sees the result inline. Reference-image hits
+                        # from search_reference_images shouldn't trigger this
+                        # — they're context for the LLM, not an artifact for
+                        # the user.
+                        if tool_name in ("generate_image", "edit_image"):
+                            yield {
+                                "type": "image.generated",
+                                "data": {
+                                    "url": img_match.group(1),
+                                    "prompt": tool_args.get("prompt", ""),
+                                    "tool": tool_name,
+                                    "source_image_url": tool_args.get("image_url"),
+                                },
+                            }
                     else:
                         messages.append(ToolMessage(content=tool_text, tool_call_id=tool_id))
                     collected_response = None

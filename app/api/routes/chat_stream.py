@@ -1686,6 +1686,17 @@ async def _handle_openscad_ws(
                                 "chat_id": chat_id,
                                 "message": str(e),
                             })
+                elif event["type"] == "image.generated":
+                    # Surface a Gemini-generated/edited image inline in chat.
+                    img_data = event.get("data", {})
+                    await websocket.send_json({
+                        "type": "image.generated",
+                        "chat_id": chat_id,
+                        "url": img_data.get("url"),
+                        "prompt": img_data.get("prompt", ""),
+                        "tool": img_data.get("tool"),
+                        "source_image_url": img_data.get("source_image_url"),
+                    })
                 elif event["type"] == "done":
                     final_data = event["data"]
                 elif event["type"] == "error":
