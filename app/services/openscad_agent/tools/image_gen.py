@@ -19,6 +19,7 @@ import base64
 import io
 import logging
 import os
+import uuid
 from typing import Optional
 
 import httpx
@@ -30,6 +31,45 @@ logger = logging.getLogger(__name__)
 
 # Single image-capable Gemini model. If Google ships a newer one, swap here.
 _IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image-preview")
+
+
+def _upload_to_r2(image_bytes: bytes, media_type: str) -> str | None:
+    """Upload image bytes to Cloudflare R2 and return the public URL.
+
+    Returns None if R2 isn't configured on this deployment — caller falls
+    back to a base64 data URL in that case so the agent flow still works.
+    """
+    try:
+        from app.api.routes.storage_proxy import _get_r2_client
+    except Exception as e:  # storage_proxy importable but R2 helper changed
+        logger.warning(f"[image_gen] R2 helper unavailable: {e}")
+        return None
+
+    client = _get_r2_client()
+    if client is None or not settings.r2_bucket_name:
+        return None
+
+    ext = media_type.split("/")[-1].split(";")[0].strip() or "png"
+    if ext == "jpeg":
+        ext = "jpg"
+    key = f"generated_images/{uuid.uuid4().hex[:16]}.{ext}"
+    try:
+        client.put_object(
+            Bucket=settings.r2_bucket_name,
+            Key=key,
+            Body=image_bytes,
+            ContentType=media_type,
+        )
+    except Exception as e:
+        logger.error(f"[image_gen] R2 put_object failed: {e}")
+        return None
+
+    url = (
+        f"https://{settings.r2_account_id}.r2.cloudflarestorage.com/"
+        f"{settings.r2_bucket_name}/{key}"
+    )
+    logger.info(f"[image_gen] R2 upload OK ({len(image_bytes)} bytes) → {url}")
+    return url
 
 
 def _client():
@@ -100,12 +140,28 @@ def _load_reference_image(image_url: str):
 
 
 def _format_tool_result(prompt: str, image_bytes: bytes, media_type: str, action: str) -> str:
-    """Wrap result so the agent loop's image-extraction regex picks it up."""
+    """Wrap result so the agent loop's image-extraction regex picks it up.
+
+    Two sentinels:
+      [IMAGE_DATA_URL]<data:…>[/IMAGE_DATA_URL]  — fed to the LLM as a
+        multimodal ToolMessage so it can see the image on this turn
+        (R2 buckets are private behind our /storage proxy, so external
+        LLMs can't fetch the http URL directly).
+      [PUBLIC_URL]<https://…>[/PUBLIC_URL]       — handed to the chat
+        UI via the image.generated stream event so messages don't carry
+        multi-MB base64 in localStorage. Only present when R2 upload
+        succeeded; the chat UI falls back to the data URL otherwise.
+    """
     data_url = _bytes_to_data_url(image_bytes, media_type)
-    return (
-        f"{action.capitalize()}d image for prompt: {prompt!r}.\n"
-        f"[IMAGE_DATA_URL]{data_url}[/IMAGE_DATA_URL]"
-    )
+    public_url = _upload_to_r2(image_bytes, media_type)
+
+    parts = [
+        f"{action.capitalize()}d image for prompt: {prompt!r}.",
+        f"[IMAGE_DATA_URL]{data_url}[/IMAGE_DATA_URL]",
+    ]
+    if public_url:
+        parts.append(f"[PUBLIC_URL]{public_url}[/PUBLIC_URL]")
+    return "\n".join(parts)
 
 
 @tool

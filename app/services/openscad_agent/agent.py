@@ -443,7 +443,8 @@ async def _run_tool_loop(
                 tool_text = str(tool_result)
                 img_match = re.search(r"\[IMAGE_DATA_URL\](.*?)\[/IMAGE_DATA_URL\]", tool_text, re.DOTALL)
                 if img_match:
-                    clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL).strip()
+                    clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL)
+                    clean_text = re.sub(r"\[PUBLIC_URL\].*?\[/PUBLIC_URL\]", "", clean_text, flags=re.DOTALL).strip()
                     content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
                     content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
                     messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
@@ -1022,21 +1023,26 @@ async def run_agent_stream(
 
                     tool_text = str(tool_result)
                     img_match = re.search(r"\[IMAGE_DATA_URL\](.*?)\[/IMAGE_DATA_URL\]", tool_text, re.DOTALL)
+                    public_match = re.search(r"\[PUBLIC_URL\](.*?)\[/PUBLIC_URL\]", tool_text, re.DOTALL)
                     if img_match:
-                        clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL).strip()
+                        # Strip both sentinels from the user-visible text.
+                        clean_text = re.sub(r"\[IMAGE_DATA_URL\].*?\[/IMAGE_DATA_URL\]", "", tool_text, flags=re.DOTALL)
+                        clean_text = re.sub(r"\[PUBLIC_URL\].*?\[/PUBLIC_URL\]", "", clean_text, flags=re.DOTALL).strip()
                         content_blocks: list[dict] = [{"type": "text", "text": clean_text}]
+                        # LLM always sees the data URL — R2 buckets are private
+                        # behind our proxy, so external models can't fetch the
+                        # public URL directly.
                         content_blocks.append({"type": "image_url", "image_url": {"url": img_match.group(1)}})
                         messages.append(ToolMessage(content=content_blocks, tool_call_id=tool_id))
-                        # Surface generated/edited images to the chat UI so the
-                        # user sees the result inline. Reference-image hits
-                        # from search_reference_images shouldn't trigger this
-                        # — they're context for the LLM, not an artifact for
-                        # the user.
+                        # Surface generated/edited images to the chat UI. Use
+                        # the R2 URL when present so the chat message stays
+                        # tiny (vs. the multi-MB data URL).
                         if tool_name in ("generate_image", "edit_image"):
+                            ui_url = public_match.group(1) if public_match else img_match.group(1)
                             yield {
                                 "type": "image.generated",
                                 "data": {
-                                    "url": img_match.group(1),
+                                    "url": ui_url,
                                     "prompt": tool_args.get("prompt", ""),
                                     "tool": tool_name,
                                     "source_image_url": tool_args.get("image_url"),
