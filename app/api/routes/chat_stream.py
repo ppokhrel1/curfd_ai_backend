@@ -64,6 +64,42 @@ def _serialize_message(message: MessageModel) -> dict[str, Any]:
     return MessageRead.model_validate(message).model_dump(mode="json")
 
 
+async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
+    """Send a JSON message over a WebSocket, swallowing the noisy
+    "after websocket.close" RuntimeError that fires when the browser
+    has already navigated away or the client reloaded mid-request.
+
+    Returns True on success, False if the socket was already closed.
+    Background tasks (RunPod pollers, image-to-3d generators, etc.)
+    that keep running after the user navigates would otherwise crash
+    with `Unexpected ASGI message 'websocket.send', after sending
+    'websocket.close' or response already completed.` and surface as
+    "Task exception was never retrieved" entries in the log.
+
+    NB: parameter is named `ws`, not `websocket`, so the call below
+    doesn't match the bulk-replace pattern that introduced this helper
+    (`await websocket.send_json(` → `await _safe_send_json(websocket, `)
+    — that rewrite would turn this internal line into infinite recursion.
+    """
+    try:
+        await ws.send_json(payload)
+        return True
+    except RuntimeError as e:
+        if "websocket.close" in str(e) or "response already completed" in str(e):
+            logger.debug(
+                f"[ws] dropped send for type={payload.get('type', '?')} "
+                f"— client gone"
+            )
+            return False
+        raise
+    except WebSocketDisconnect:
+        logger.debug(
+            f"[ws] dropped send for type={payload.get('type', '?')} — "
+            f"WebSocketDisconnect"
+        )
+        return False
+
+
 # Maximum string length we'll print into a log. Anything longer (data: URLs,
 # raw base64 payloads echoed back by RunPod) gets collapsed to a marker so
 # the worker output doesn't dump multi-MB blobs into the log file.
@@ -827,7 +863,7 @@ async def _handle_image_to_3d_ws_task(
 
             candidates, search_query = await _fetch_image_candidates(i3d_payload.prompt)
             if not candidates:
-                await websocket.send_json({
+                await _safe_send_json(websocket, {
                     "type": "image_to_3d.error",
                     "chat_id": chat_id,
                     "message": f"Could not find reference images for '{i3d_payload.prompt}'. Try uploading an image instead.",
@@ -837,7 +873,7 @@ async def _handle_image_to_3d_ws_task(
             request_id = str(_uuid.uuid4())
 
             # Send image options to frontend — user picks via image_to_3d.image_selected
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "image_to_3d.image_options",
                 "chat_id": chat_id,
                 "search_query": search_query,
@@ -855,7 +891,7 @@ async def _handle_image_to_3d_ws_task(
                 payload=i3d_payload,
                 db=db,
             )
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.queued",
             "chat_id": chat_id,
             "runpod_id": response.runpod_id,
@@ -864,7 +900,7 @@ async def _handle_image_to_3d_ws_task(
         })
     except Exception as e:
         logger.error(f"Image-to-3D WS error: {e}", exc_info=True)
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.error",
             "chat_id": chat_id,
             "message": str(e),
@@ -887,7 +923,7 @@ async def _handle_mesh_modification_ws(
         output_filename = inner.get("output_filename")
 
         if not mesh_url or not modification:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "mesh_modification.error",
                 "chat_id": chat_id,
                 "message": "mesh_url and modification are required",
@@ -906,14 +942,14 @@ async def _handle_mesh_modification_ws(
         runpod_response = await client.start_raw_job(job_payload)
         runpod_id = runpod_response.get("id")
         if not runpod_id:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "mesh_modification.error",
                 "chat_id": chat_id,
                 "message": "RunPod did not return a job id",
             })
             return
 
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "mesh_modification.queued",
             "chat_id": chat_id,
             "runpod_id": runpod_id,
@@ -929,7 +965,7 @@ async def _handle_mesh_modification_ws(
         )
     except Exception as e:
         logger.error(f"Mesh modification WS error: {e}", exc_info=True)
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "mesh_modification.error",
             "chat_id": chat_id,
             "message": str(e),
@@ -951,7 +987,7 @@ async def _handle_inpaint_ws(
         prompt = inner.get("prompt", "")
 
         if not image_data or not prompt:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "inpaint.error",
                 "chat_id": chat_id,
                 "message": "image_data and prompt are required",
@@ -971,14 +1007,14 @@ async def _handle_inpaint_ws(
         runpod_response = await client.start_raw_job(job_payload)
         runpod_id = runpod_response.get("id")
         if not runpod_id:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "inpaint.error",
                 "chat_id": chat_id,
                 "message": "RunPod did not return a job id",
             })
             return
 
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "inpaint.queued",
             "chat_id": chat_id,
             "runpod_id": runpod_id,
@@ -994,7 +1030,7 @@ async def _handle_inpaint_ws(
         )
     except Exception as e:
         logger.error(f"Inpaint WS error: {e}", exc_info=True)
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "inpaint.error",
             "chat_id": chat_id,
             "message": str(e),
@@ -1060,7 +1096,7 @@ async def _handle_generate_custom_image_ws(
     logger = logging.getLogger(__name__)
 
     if not custom_prompt or not custom_prompt.strip():
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
@@ -1068,7 +1104,7 @@ async def _handle_generate_custom_image_ws(
         })
         return
 
-    await websocket.send_json({
+    await _safe_send_json(websocket, {
         "type": "image_to_3d.candidate_pending",
         "chat_id": chat_id,
         "request_id": request_id,
@@ -1077,7 +1113,7 @@ async def _handle_generate_custom_image_ws(
 
     display_url, runpod_url, err = _gen_candidate_via_gemini(custom_prompt, "generate")
     if err or not display_url:
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
@@ -1085,7 +1121,7 @@ async def _handle_generate_custom_image_ws(
         })
         return
 
-    await websocket.send_json({
+    await _safe_send_json(websocket, {
         "type": "image_to_3d.candidate_ready",
         "chat_id": chat_id,
         "request_id": request_id,
@@ -1109,7 +1145,7 @@ async def _handle_edit_candidate_ws(
     logger = logging.getLogger(__name__)
 
     if not edit_prompt or not edit_prompt.strip():
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
@@ -1117,7 +1153,7 @@ async def _handle_edit_candidate_ws(
         })
         return
     if not image_url:
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
@@ -1131,7 +1167,7 @@ async def _handle_edit_candidate_ws(
     try:
         ref_image = _load_reference_image(image_url)
     except Exception as e:
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
@@ -1139,7 +1175,7 @@ async def _handle_edit_candidate_ws(
         })
         return
 
-    await websocket.send_json({
+    await _safe_send_json(websocket, {
         "type": "image_to_3d.candidate_pending",
         "chat_id": chat_id,
         "request_id": request_id,
@@ -1150,7 +1186,7 @@ async def _handle_edit_candidate_ws(
         [edit_prompt, ref_image], "edit"
     )
     if err or not display_url:
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
@@ -1158,7 +1194,7 @@ async def _handle_edit_candidate_ws(
         })
         return
 
-    await websocket.send_json({
+    await _safe_send_json(websocket, {
         "type": "image_to_3d.candidate_ready",
         "chat_id": chat_id,
         "request_id": request_id,
@@ -1201,7 +1237,7 @@ async def _handle_image_selected_ws(
                 ),
                 db=db,
             )
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.queued",
             "chat_id": chat_id,
             "runpod_id": response.runpod_id,
@@ -1210,7 +1246,7 @@ async def _handle_image_selected_ws(
         })
     except Exception as e:
         logger.error(f"Image selection handler error: {e}", exc_info=True)
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "image_to_3d.error",
             "chat_id": chat_id,
             "message": str(e),
@@ -1839,13 +1875,13 @@ async def _handle_openscad_ws(
                 code_language=options.get("code_language", "openscad"),
             ):
                 if event["type"] == "token":
-                    await websocket.send_json({
+                    await _safe_send_json(websocket, {
                         "type": "openscad.token",
                         "chat_id": chat_id,
                         "text": event["text"],
                     })
                 elif event["type"] == "tool":
-                    await websocket.send_json({
+                    await _safe_send_json(websocket, {
                         "type": "openscad.tool",
                         "chat_id": chat_id,
                         "tool_name": event["tool_name"],
@@ -1874,7 +1910,7 @@ async def _handle_openscad_ws(
                                         status_timeout_seconds=settings.image_to_3d_timeout_seconds,
                                     )
                                 )
-                                await websocket.send_json({
+                                await _safe_send_json(websocket, {
                                     "type": "image_to_3d.started",
                                     "chat_id": chat_id,
                                     "runpod_id": i3d_runpod_id,
@@ -1882,7 +1918,7 @@ async def _handle_openscad_ws(
                                 })
                         except Exception as e:
                             logger.error(f"Image-to-3D trigger failed: {e}")
-                            await websocket.send_json({
+                            await _safe_send_json(websocket, {
                                 "type": "image_to_3d.error",
                                 "chat_id": chat_id,
                                 "message": str(e),
@@ -1934,7 +1970,7 @@ async def _handle_openscad_ws(
                                 f"Failed to persist generated-image message: {exc}"
                             )
 
-                    await websocket.send_json({
+                    await _safe_send_json(websocket, {
                         "type": "image.generated",
                         "chat_id": chat_id,
                         "url": img_url,
@@ -1946,7 +1982,7 @@ async def _handle_openscad_ws(
                 elif event["type"] == "done":
                     final_data = event["data"]
                 elif event["type"] == "error":
-                    await websocket.send_json({
+                    await _safe_send_json(websocket, {
                         "type": "openscad.error",
                         "chat_id": chat_id,
                         "message": event["message"],
@@ -1995,7 +2031,7 @@ async def _handle_openscad_ws(
                     except Exception:
                         logger.exception("Part auto-save failed (non-critical)")
 
-                await websocket.send_json({
+                await _safe_send_json(websocket, {
                     "type": "openscad.done",
                     "chat_id": chat_id,
                     "data": {
@@ -2010,7 +2046,7 @@ async def _handle_openscad_ws(
     except Exception as e:
         logger.exception(f"OpenSCAD WS handler error: {e}")
         try:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "openscad.error",
                 "chat_id": chat_id,
                 "message": str(e),
@@ -2056,7 +2092,7 @@ async def chat_socket(
     await chat_socket_manager.connect(chat_id, websocket)
     async with SessionLocal() as db:
         messages = await _load_serialized_messages(db, chat_id)
-    await websocket.send_json(
+    await _safe_send_json(websocket, 
         {
             "type": "chat.history",
             "chat_id": chat_id,
