@@ -11,7 +11,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/curfd_uploads")
+# /tmp on macOS gets periodically cleared, which 404s any chat-image URLs
+# already persisted in the frontend's chat history. Default to a path under
+# the user's home dir so uploads survive restarts; override with UPLOAD_DIR
+# (e.g. a Docker-volume-backed path in production).
+UPLOAD_DIR = os.environ.get(
+    "UPLOAD_DIR", os.path.expanduser("~/.curfd_uploads")
+)
 CHAT_IMAGES_DIR = os.path.join(UPLOAD_DIR, "chat-images")
 
 # Ensure directory exists at import time
