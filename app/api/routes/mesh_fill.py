@@ -120,28 +120,40 @@ async def fill_mesh(req: FillMeshRequest):
         raise HTTPException(status_code=422, detail="Mesh has no faces")
 
     # 3. Repair.
+    # `method="auto"` used to mean "try pymeshfix first, fall back to
+    # trimesh on ImportError." That default was wrong for AI meshes:
+    # pymeshfix discards loose components on its way to one closed
+    # manifold and blob-ifies anything it doesn't recognise as the main
+    # body. Auto now prefers the conservative trimesh path; users have
+    # to opt into pymeshfix explicitly when they actually need the
+    # aggressive reconstruction.
     method_used = req.method
-    if req.method in ("auto", "pymeshfix"):
+    if req.method == "pymeshfix":
         try:
             mesh = _repair_pymeshfix(mesh)
             method_used = "pymeshfix"
-            logger.info(f"Filled via pymeshfix: faces={len(mesh.faces)} watertight={mesh.is_watertight}")
+            logger.info(
+                f"Filled via pymeshfix (explicit): "
+                f"faces={len(mesh.faces)} watertight={mesh.is_watertight}"
+            )
         except ImportError:
-            if req.method == "pymeshfix":
-                raise HTTPException(
-                    status_code=503,
-                    detail="pymeshfix not installed on server; pass method='trimesh' or install pymeshfix",
-                )
-            # auto → fall through to trimesh
-            mesh = _repair_trimesh(mesh)
-            method_used = "trimesh"
+            raise HTTPException(
+                status_code=503,
+                detail="pymeshfix not installed on server; "
+                "use method='trimesh' or install pymeshfix",
+            )
         except Exception as e:
             logger.warning(f"pymeshfix failed, falling back to trimesh: {e}")
             mesh = _repair_trimesh(mesh)
             method_used = "trimesh"
-    else:  # explicit "trimesh"
+    else:
+        # "auto" or "trimesh" → trimesh fill_holes path
         mesh = _repair_trimesh(mesh)
         method_used = "trimesh"
+        logger.info(
+            f"Filled via trimesh ({req.method!r}): "
+            f"faces={len(mesh.faces)} watertight={mesh.is_watertight}"
+        )
 
     # 4. Export to GLB and upload to R2.
     try:
