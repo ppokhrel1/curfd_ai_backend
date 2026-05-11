@@ -124,16 +124,25 @@ import time as _time_mod
 
 _PICKER_TTL_SECONDS = 600  # 10 min — way longer than any normal session gap.
 _PICKER_RESULTS: dict[str, tuple[float, dict]] = {}
+# Per-picker-session prompt log keyed by request_id. The picker reuses
+# the same request_id across generate → edit → edit, so this accumulates
+# the full prompt chain for a single visual session. Used to thread
+# context into the Gemini call on edits so iteration carries intent
+# (e.g. "make them gold" after "a bunny with stars" knows what 'them'
+# refers to).
+_PICKER_SESSIONS: dict[str, list[dict]] = {}
 
 
 def _evict_expired_picker_results(now: float | None = None) -> None:
     """Drop stale entries. Called lazily on every read/write so we never
-    need a background sweeper task."""
+    need a background sweeper task. Sessions are evicted in lockstep
+    with results since they share the same request_id keyspace."""
     now = now if now is not None else _time_mod.time()
     cutoff = now - _PICKER_TTL_SECONDS
     stale = [rid for rid, (ts, _) in _PICKER_RESULTS.items() if ts < cutoff]
     for rid in stale:
         _PICKER_RESULTS.pop(rid, None)
+        _PICKER_SESSIONS.pop(rid, None)
 
 
 def _cache_picker_result(request_id: str, payload: dict) -> None:
@@ -157,6 +166,49 @@ def _get_picker_result(request_id: str) -> dict | None:
         return None
     _, payload = entry
     return payload
+
+
+def _append_picker_history(request_id: str, action: str, prompt: str) -> None:
+    """Record a prompt in the picker's session log. `action` is one of
+    "generate" / "edit"; `prompt` is the user's instruction. Used to
+    build smart-context for follow-up edits."""
+    if not request_id or not prompt:
+        return
+    _evict_expired_picker_results()
+    session = _PICKER_SESSIONS.setdefault(request_id, [])
+    session.append({"action": action, "prompt": prompt})
+
+
+def _build_edit_prompt_with_context(request_id: str, edit_prompt: str) -> str:
+    """Prepend recent picker history to an edit prompt so Gemini has
+    the full session context for compound edits.
+
+    The image itself carries most of the visual state, so we only need
+    a brief textual hint about prior intent — enough to disambiguate
+    pronouns ("make them gold" → "them" refers to stars from the
+    original generate prompt). Keep it to the last 5 turns and truncate
+    each prompt at 120 chars to keep the preamble small.
+
+    Returns the original prompt unchanged when there's no prior history
+    (i.e., this is the first edit on a session)."""
+    session = _PICKER_SESSIONS.get(request_id) or []
+    if not session:
+        return edit_prompt
+    recent = session[-5:]
+    lines = []
+    for entry in recent:
+        action = entry.get("action", "?")
+        prompt = (entry.get("prompt") or "")[:120]
+        if not prompt:
+            continue
+        lines.append(f"- {action}: {prompt}")
+    if not lines:
+        return edit_prompt
+    return (
+        "Context — earlier prompts applied to this image:\n"
+        + "\n".join(lines)
+        + f"\n\nNow apply this change: {edit_prompt}"
+    )
 
 
 @router.get("/picker/candidate/{request_id}")
@@ -1210,6 +1262,10 @@ async def _handle_generate_custom_image_ws(
         await _safe_send_json(websocket, err_event)
         return
 
+    # Anchor the picker session with the original generate prompt — every
+    # subsequent edit will reference it via _build_edit_prompt_with_context.
+    _append_picker_history(request_id, "generate", custom_prompt)
+
     ready_event = {
         "type": "image_to_3d.candidate_ready",
         "chat_id": chat_id,
@@ -1279,8 +1335,19 @@ async def _handle_edit_candidate_ws(
         "action": "edit",
     })
 
+    # Thread prior session prompts into the Gemini edit so pronouns and
+    # compound directives resolve correctly. The user-typed `edit_prompt`
+    # is still what we cache + show in the UI; only the Gemini-bound
+    # prompt is augmented.
+    effective_prompt = _build_edit_prompt_with_context(request_id, edit_prompt)
+    if effective_prompt != edit_prompt:
+        logger.info(
+            f"[i2i edit] threaded session context into prompt "
+            f"({len(effective_prompt) - len(edit_prompt)} extra chars)"
+        )
+
     display_url, runpod_url, err = _gen_candidate_via_gemini(
-        [edit_prompt, ref_image], "edit"
+        [effective_prompt, ref_image], "edit"
     )
     if err or not display_url:
         err_event = {
@@ -1292,6 +1359,11 @@ async def _handle_edit_candidate_ws(
         _cache_picker_result(request_id, err_event)
         await _safe_send_json(websocket, err_event)
         return
+
+    # Record the raw user prompt (not the augmented one) so subsequent
+    # edits see what the user actually asked for, not our internal
+    # context preamble.
+    _append_picker_history(request_id, "edit", edit_prompt)
 
     ready_event = {
         "type": "image_to_3d.candidate_ready",

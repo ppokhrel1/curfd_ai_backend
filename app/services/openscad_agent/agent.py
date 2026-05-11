@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncGenerator
@@ -27,6 +28,40 @@ from app.schemas.openscad import OpenSCADResponse, OpenSCADParameter
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ── History trimming ─────────────────────────────────────────────────────────
+# Long chat sessions accumulate dozens of turns. The full DB-loaded history
+# can blow the LLM's input token budget and slow every call. We trim to the
+# most-recent N turns; older turns are dropped (their state is usually
+# superseded by more recent ones — the latest assistant message with code
+# is the load-bearing one). N is tunable via env so we can bump it on
+# bigger-context models without code changes.
+_AGENT_HISTORY_MAX_MESSAGES = int(
+    os.environ.get("AGENT_HISTORY_MAX_MESSAGES", "20")
+)
+
+
+def _trim_history(
+    history: list,
+    max_messages: int | None = None,
+) -> list:
+    """Cap conversation history to the most recent N messages.
+
+    Keeps the relative order intact. Logs once when it drops anything so
+    we can see in prod logs when sessions get long. Returns a fresh list
+    so callers can safely mutate it.
+    """
+    if max_messages is None:
+        max_messages = _AGENT_HISTORY_MAX_MESSAGES
+    if not history or max_messages <= 0 or len(history) <= max_messages:
+        return list(history)
+    dropped = len(history) - max_messages
+    logger.info(
+        f"[agent] history trim: dropping {dropped} oldest messages "
+        f"(kept {max_messages} of {len(history)})"
+    )
+    return list(history)[-max_messages:]
 
 # ── Jewelry domain detection ─────────────────────────────────────────────────
 
@@ -223,7 +258,7 @@ def _build_direct_generation_messages(
         user_input, rag_context, code_language, has_images=bool(image_data_urls)
     )
     human_msg = _build_human_message(user_input, image_data_urls)
-    return [SystemMessage(content=prompt)] + list(history) + [human_msg], experiment_meta
+    return [SystemMessage(content=prompt)] + _trim_history(history) + [human_msg], experiment_meta
 
 
 def _get_current_code_from_history(history: list[HumanMessage | AIMessage]) -> str:
@@ -271,7 +306,7 @@ async def _generate_code(
     if experiment_meta and _experiment_meta_out is not None:
         _experiment_meta_out.update(experiment_meta)
     code_messages: list = [SystemMessage(content=prompt)]
-    code_messages.extend(history)
+    code_messages.extend(_trim_history(history))
 
     # Add base code context if modifying existing model
     if base_code:
@@ -362,7 +397,7 @@ async def _run_tool_loop(
         agent_prompt = AGENT_PROMPT_CADQUERY
     else:
         agent_prompt = AGENT_PROMPT
-    messages = [SystemMessage(content=agent_prompt)] + list(history) + [human_msg]
+    messages = [SystemMessage(content=agent_prompt)] + _trim_history(history) + [human_msg]
 
     for _ in range(max_iterations):
         response = await llm_with_tools.ainvoke(messages)
@@ -701,7 +736,7 @@ async def run_agent(
         # Images: use structured output for direct code gen
         human_msg = _build_human_message(user_input, image_data_urls)
         prompt, experiment_meta = _build_code_prompt(user_input, rag_context, code_language)
-        messages = [SystemMessage(content=prompt)] + list(history) + [human_msg]
+        messages = [SystemMessage(content=prompt)] + _trim_history(history) + [human_msg]
         try:
             structured_llm = _get_structured_llm(c)
             gen_result = await structured_llm.ainvoke(messages)
@@ -906,7 +941,7 @@ async def run_agent_stream(
         system_prompt = AGENT_PROMPT_CADQUERY
     else:
         system_prompt = AGENT_PROMPT
-    messages = [SystemMessage(content=system_prompt)] + list(history) + [human_msg]
+    messages = [SystemMessage(content=system_prompt)] + _trim_history(history) + [human_msg]
 
     agent_text = ""
     code_text = ""
