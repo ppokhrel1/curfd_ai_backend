@@ -179,22 +179,85 @@ def _extract_text_commentary(response) -> str:
     return " ".join(f.strip() for f in fragments if f.strip())
 
 
+_FINISH_REASON_HUMAN = {
+    "PROHIBITED_CONTENT": (
+        "Gemini blocked this prompt as prohibited content "
+        "(commonly: copyrighted/trademarked characters, real people, "
+        "or restricted subjects). Try a generic description instead."
+    ),
+    "SAFETY": (
+        "Gemini blocked this prompt for safety reasons. "
+        "Rephrase to avoid sensitive content."
+    ),
+    "RECITATION": (
+        "Gemini refused to recite copyrighted material. "
+        "Describe the object generically instead of naming a brand or character."
+    ),
+    "BLOCKLIST": (
+        "Gemini blocked one of the words in this prompt. "
+        "Try alternative wording."
+    ),
+    "SPII": (
+        "Gemini refused because the prompt may contain personal information. "
+        "Remove names or identifying details."
+    ),
+    "IMAGE_SAFETY": (
+        "Gemini refused on image-safety grounds. "
+        "Try a different reference image."
+    ),
+    "MAX_TOKENS": (
+        "Gemini hit the response length limit before producing an image. "
+        "Shorten the prompt and retry."
+    ),
+}
+
+
 def _refusal_summary(response) -> str:
-    """Best-effort string describing why the model returned no image —
-    finish_reason, safety filter category, etc."""
-    bits: list[str] = []
+    """Human-readable explanation of why Gemini returned no image.
+
+    Returns a single sentence the picker can show end-users directly.
+    Falls back to a generic message + raw finish_reason if we don't
+    recognize the code, so we never swallow the failure silently.
+    """
+    finish_reason_raw: str | None = None
+    flagged_categories: list[str] = []
+    text_commentary = _extract_text_commentary(response)
+
     try:
         for cand in getattr(response, "candidates", []) or []:
             fr = getattr(cand, "finish_reason", None)
-            if fr:
-                bits.append(f"finish_reason={fr}")
+            if fr is not None and finish_reason_raw is None:
+                # google-genai usually exposes an enum; .name is the code.
+                finish_reason_raw = getattr(fr, "name", None) or str(fr)
             for sr in getattr(cand, "safety_ratings", []) or []:
-                bits.append(
-                    f"{getattr(sr, 'category', '?')}={getattr(sr, 'probability', '?')}"
-                )
+                prob = getattr(sr, "probability", None)
+                prob_name = getattr(prob, "name", None) or str(prob or "")
+                if prob_name in {"HIGH", "MEDIUM"}:
+                    cat = getattr(sr, "category", "?")
+                    cat_name = getattr(cat, "name", None) or str(cat)
+                    flagged_categories.append(cat_name)
     except Exception:
         pass
-    return ", ".join(str(b) for b in bits) or "no metadata"
+
+    # Strip enum prefix if present, e.g. "FinishReason.PROHIBITED_CONTENT".
+    code = (finish_reason_raw or "").rsplit(".", 1)[-1].upper()
+    human = _FINISH_REASON_HUMAN.get(code)
+    if human:
+        if text_commentary:
+            return f"{human} (Gemini said: \"{text_commentary[:160]}\")"
+        return human
+
+    if flagged_categories:
+        cats = ", ".join(sorted(set(flagged_categories)))
+        return (
+            f"Gemini's safety filter flagged this prompt ({cats}). "
+            f"Try rephrasing."
+        )
+    if text_commentary:
+        return f"Gemini returned no image. It said: \"{text_commentary[:200]}\""
+    if code:
+        return f"Gemini returned no image (reason: {code}). Try rephrasing."
+    return "Gemini returned no image. Try rephrasing the prompt."
 
 
 # Allowed values per Gemini Image API.
@@ -299,9 +362,11 @@ def generate_image(prompt: str) -> str:
 
     extracted = _extract_image_bytes(response)
     if extracted is None:
-        text = getattr(response, "text", None) or "no text"
-        logger.warning(f"[image_gen] No image in response. Text={text[:200]}")
-        return f"Gemini returned no image. Text response: {text[:300]}"
+        reason = _refusal_summary(response)
+        logger.warning(f"[image_gen] generate_image refused: {reason}")
+        # Agent-visible string: the LLM uses this verbatim in its reply
+        # to the user, so phrase it as a complete user-facing sentence.
+        return f"Image generation failed. {reason}"
 
     image_bytes, media_type = extracted
     logger.info(
@@ -347,9 +412,9 @@ def edit_image(image_url: str, prompt: str) -> str:
 
     extracted = _extract_image_bytes(response)
     if extracted is None:
-        text = getattr(response, "text", None) or "no text"
-        logger.warning(f"[image_gen] No image in edit response. Text={text[:200]}")
-        return f"Gemini returned no edited image. Text response: {text[:300]}"
+        reason = _refusal_summary(response)
+        logger.warning(f"[image_gen] edit_image refused: {reason}")
+        return f"Image edit failed. {reason}"
 
     image_bytes, media_type = extracted
     logger.info(
