@@ -65,39 +65,119 @@ def _serialize_message(message: MessageModel) -> dict[str, Any]:
 
 
 async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
-    """Send a JSON message over a WebSocket, swallowing the noisy
-    "after websocket.close" RuntimeError that fires when the browser
-    has already navigated away or the client reloaded mid-request.
+    """Send a JSON message over a WebSocket, swallowing every flavour of
+    "the other side hung up" exception so background tasks (RunPod
+    pollers, image-to-3d generators, etc.) don't crash when the client
+    has already navigated away or the server is restarting mid-request.
 
     Returns True on success, False if the socket was already closed.
-    Background tasks (RunPod pollers, image-to-3d generators, etc.)
-    that keep running after the user navigates would otherwise crash
-    with `Unexpected ASGI message 'websocket.send', after sending
-    'websocket.close' or response already completed.` and surface as
-    "Task exception was never retrieved" entries in the log.
+
+    Catches: RuntimeError ("after websocket.close"), starlette
+    WebSocketDisconnect, uvicorn ClientDisconnected, and anything else
+    that escapes — we never want a noisy traceback for "couldn't send
+    a status update because the user closed their tab."
 
     NB: parameter is named `ws`, not `websocket`, so the call below
     doesn't match the bulk-replace pattern that introduced this helper
     (`await websocket.send_json(` → `await _safe_send_json(websocket, `)
     — that rewrite would turn this internal line into infinite recursion.
     """
+    msg_type = "?"
+    try:
+        # Defensive: payload should be a dict but we don't trust it
+        # enough to let an AttributeError here mask the real send error.
+        if isinstance(payload, dict):
+            msg_type = str(payload.get("type", "?"))
+    except Exception:
+        pass
     try:
         await ws.send_json(payload)
         return True
+    except WebSocketDisconnect:
+        logger.debug(f"[ws] dropped send for type={msg_type} — WebSocketDisconnect")
+        return False
     except RuntimeError as e:
+        # Common when the ASGI app keeps sending after the socket closed.
         if "websocket.close" in str(e) or "response already completed" in str(e):
-            logger.debug(
-                f"[ws] dropped send for type={payload.get('type', '?')} "
-                f"— client gone"
-            )
+            logger.debug(f"[ws] dropped send for type={msg_type} — client gone")
             return False
         raise
-    except WebSocketDisconnect:
-        logger.debug(
-            f"[ws] dropped send for type={payload.get('type', '?')} — "
-            f"WebSocketDisconnect"
-        )
+    except Exception as e:
+        # Catch-all so a transient network/server error never escapes
+        # a background task. We log INFO (not debug) because anything
+        # non-disconnect-flavoured is worth seeing once in production.
+        name = type(e).__name__
+        if name in ("ClientDisconnected", "ConnectionClosedError", "ConnectionClosedOK"):
+            logger.debug(f"[ws] dropped send for type={msg_type} — {name}")
+        else:
+            logger.info(f"[ws] send failed for type={msg_type}: {name}: {e}")
         return False
+
+
+# ─── Picker candidate cache (WebSocket-resilient delivery) ────────────────
+# When `_handle_generate_custom_image_ws` / `_handle_edit_candidate_ws`
+# finish, the result is sent over the WS *and* stashed here keyed by
+# `request_id`. If the WS dropped mid-task (server reload, network blip),
+# the frontend recovers the candidate via `GET /picker/candidate/{rid}`.
+# Memory-only with TTL — the R2 URL inside is durable for ~7 days.
+import time as _time_mod
+
+_PICKER_TTL_SECONDS = 600  # 10 min — way longer than any normal session gap.
+_PICKER_RESULTS: dict[str, tuple[float, dict]] = {}
+
+
+def _evict_expired_picker_results(now: float | None = None) -> None:
+    """Drop stale entries. Called lazily on every read/write so we never
+    need a background sweeper task."""
+    now = now if now is not None else _time_mod.time()
+    cutoff = now - _PICKER_TTL_SECONDS
+    stale = [rid for rid, (ts, _) in _PICKER_RESULTS.items() if ts < cutoff]
+    for rid in stale:
+        _PICKER_RESULTS.pop(rid, None)
+
+
+def _cache_picker_result(request_id: str, payload: dict) -> None:
+    """Store a candidate payload for later REST recovery. Overwrites any
+    earlier cached entry for the same `request_id` (ready replaces error,
+    error replaces ready, etc.) — the most recent state wins."""
+    if not request_id:
+        return
+    now = _time_mod.time()
+    _evict_expired_picker_results(now)
+    _PICKER_RESULTS[request_id] = (now, payload)
+
+
+def _get_picker_result(request_id: str) -> dict | None:
+    if not request_id:
+        return None
+    now = _time_mod.time()
+    _evict_expired_picker_results(now)
+    entry = _PICKER_RESULTS.get(request_id)
+    if entry is None:
+        return None
+    _, payload = entry
+    return payload
+
+
+@router.get("/picker/candidate/{request_id}")
+async def get_picker_candidate(
+    request_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Recover a picker candidate when the WebSocket dropped before the
+    response landed. Returns {"status": "pending"} if we have nothing
+    cached (generation still running OR never reached us OR TTL expired).
+    Frontend polls this after submitting a generate/edit when the WS
+    delivery times out.
+
+    Auth-gated (same bearer token as the rest of the chat stream).
+    request_id is a uuid4 generated client-side so even with auth, the
+    cache key isn't enumerable.
+    """
+    cached = _get_picker_result(request_id)
+    if cached is None:
+        return {"status": "pending"}
+    return {"status": "found", "payload": cached}
 
 
 # Maximum string length we'll print into a log. Anything longer (data: URLs,
@@ -1068,9 +1148,12 @@ def _gen_candidate_via_gemini(
 
     extracted = _extract_image_bytes(response)
     if not extracted:
+        # `_refusal_summary` now returns a self-contained user-facing sentence
+        # (e.g. "Gemini blocked this prompt as prohibited content..."); pass it
+        # through verbatim so the picker shows the actual reason.
         reason = _refusal_summary(response)
-        logger.warning(f"[i2i {purpose}] No image in Gemini response ({reason})")
-        return None, None, f"Gemini didn't return an image ({reason}). Try rephrasing."
+        logger.warning(f"[i2i {purpose}] No image in Gemini response: {reason}")
+        return None, None, reason
 
     image_bytes, media_type = extracted
     public_url = _upload_to_r2(image_bytes, media_type)
@@ -1096,12 +1179,14 @@ async def _handle_generate_custom_image_ws(
     logger = logging.getLogger(__name__)
 
     if not custom_prompt or not custom_prompt.strip():
-        await _safe_send_json(websocket, {
+        err_event = {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
             "message": "Description required to generate a custom image.",
-        })
+        }
+        _cache_picker_result(request_id, err_event)
+        await _safe_send_json(websocket, err_event)
         return
 
     await _safe_send_json(websocket, {
@@ -1113,15 +1198,19 @@ async def _handle_generate_custom_image_ws(
 
     display_url, runpod_url, err = _gen_candidate_via_gemini(custom_prompt, "generate")
     if err or not display_url:
-        await _safe_send_json(websocket, {
+        err_event = {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
             "message": err or "Generation failed",
-        })
+        }
+        # Cache BEFORE sending so the REST-recovery path works even when
+        # the WS send raises mid-task (server reload, broken pipe).
+        _cache_picker_result(request_id, err_event)
+        await _safe_send_json(websocket, err_event)
         return
 
-    await _safe_send_json(websocket, {
+    ready_event = {
         "type": "image_to_3d.candidate_ready",
         "chat_id": chat_id,
         "request_id": request_id,
@@ -1129,7 +1218,9 @@ async def _handle_generate_custom_image_ws(
         "runpod_url": runpod_url,
         "source": "ai_generated",
         "prompt": custom_prompt,
-    })
+    }
+    _cache_picker_result(request_id, ready_event)
+    await _safe_send_json(websocket, ready_event)
 
 
 async def _handle_edit_candidate_ws(
@@ -1145,20 +1236,24 @@ async def _handle_edit_candidate_ws(
     logger = logging.getLogger(__name__)
 
     if not edit_prompt or not edit_prompt.strip():
-        await _safe_send_json(websocket, {
+        err_event = {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
             "message": "Describe the change you want to apply.",
-        })
+        }
+        _cache_picker_result(request_id, err_event)
+        await _safe_send_json(websocket, err_event)
         return
     if not image_url:
-        await _safe_send_json(websocket, {
+        err_event = {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
             "message": "No image to edit.",
-        })
+        }
+        _cache_picker_result(request_id, err_event)
+        await _safe_send_json(websocket, err_event)
         return
 
     # Load the current image into a PIL.Image so Gemini can use it as a
@@ -1167,12 +1262,14 @@ async def _handle_edit_candidate_ws(
     try:
         ref_image = _load_reference_image(image_url)
     except Exception as e:
-        await _safe_send_json(websocket, {
+        err_event = {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
             "message": f"Could not load source image: {e}",
-        })
+        }
+        _cache_picker_result(request_id, err_event)
+        await _safe_send_json(websocket, err_event)
         return
 
     await _safe_send_json(websocket, {
@@ -1186,15 +1283,17 @@ async def _handle_edit_candidate_ws(
         [edit_prompt, ref_image], "edit"
     )
     if err or not display_url:
-        await _safe_send_json(websocket, {
+        err_event = {
             "type": "image_to_3d.candidate_error",
             "chat_id": chat_id,
             "request_id": request_id,
             "message": err or "Edit failed",
-        })
+        }
+        _cache_picker_result(request_id, err_event)
+        await _safe_send_json(websocket, err_event)
         return
 
-    await _safe_send_json(websocket, {
+    ready_event = {
         "type": "image_to_3d.candidate_ready",
         "chat_id": chat_id,
         "request_id": request_id,
@@ -1202,7 +1301,9 @@ async def _handle_edit_candidate_ws(
         "runpod_url": runpod_url,
         "source": "ai_edited",
         "prompt": edit_prompt,
-    })
+    }
+    _cache_picker_result(request_id, ready_event)
+    await _safe_send_json(websocket, ready_event)
 
 
 async def _handle_image_selected_ws(
