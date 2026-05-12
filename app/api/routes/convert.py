@@ -8,8 +8,10 @@ import numpy as np
 import trimesh
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from app.api.routes.storage_proxy import fetch_object_bytes
+from app.services.painted_3mf import derive_face_labels, write_painted_3mf
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +220,135 @@ async def convert_to_stl(
     return StreamingResponse(
         io.BytesIO(out_bytes),
         media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{out_filename}"',
+            "Content-Length": str(len(out_bytes)),
+        },
+    )
+
+
+# ─── Painted 3MF (multi-color for OrcaSlicer / Bambu Studio) ───────────────
+def _load_with_texture(source_bytes: bytes, ext: str) -> trimesh.Trimesh:
+    """Load a GLB and preserve TextureVisuals on the returned Trimesh.
+
+    `trimesh.util.concatenate` strips visuals, so for the painted-3mf
+    path we cherry-pick the first non-empty geometry from the Scene
+    (Hunyuan3D-Paint outputs a single mesh) instead of flattening.
+    """
+    loaded = trimesh.load(io.BytesIO(source_bytes), file_type=ext)
+    if isinstance(loaded, trimesh.Scene):
+        for geom in loaded.geometry.values():
+            if isinstance(geom, trimesh.Trimesh) and len(geom.faces) > 0:
+                return geom
+        raise ValueError("Scene contains no textured mesh")
+    if not isinstance(loaded, trimesh.Trimesh) or len(loaded.faces) == 0:
+        raise ValueError(f"Loaded object has no faces: {type(loaded)}")
+    return loaded
+
+
+class Convert3MFBody(BaseModel):
+    url: str
+    # Optional: per-part face IDs (used when the GLB is untextured but
+    # we have PartField segmentation labels). Each inner list is the
+    # face indices belonging to one part.
+    part_face_ids: list[list[int]] | None = None
+
+
+@router.post("/3mf")
+async def convert_to_painted_3mf(
+    body: Convert3MFBody,
+    filaments: int = Query(
+        4,
+        ge=1,
+        le=16,
+        description="Filament slot count — sampled for palette metadata "
+        "only. Auto-paint of triangles is currently disabled (the format "
+        "varies across Slic3r forks); the user paints in the slicer's "
+        "MMU paint tool. Kept for future auto-paint mode.",
+    ),
+    target_size_mm: float | None = Query(
+        80.0,
+        ge=1.0,
+        le=400.0,
+        description="Scale so the longest bbox dim equals this in millimetres. "
+        "Pass 0 to skip scaling.",
+    ),
+    center: bool = Query(True, description="Re-centre at origin, seat on z=0"),
+):
+    """Convert a GLB to a clean 3MF for OrcaSlicer / Bambu Studio / Anycubic.
+
+    Emits a single watertight mesh with print-ready prep (centre, scale).
+    No auto-paint — that path triggered a slicer segfault (custom
+    `paint_color` split-tree encoding) and a non-manifold-edge warning
+    (multi-component cluster split), so we ship a plain mesh and let the
+    user paint colours in the slicer's built-in MMU tool.
+
+    Palette samples (if a texture is present) are surfaced as `<metadata>`
+    in the 3MF for any downstream tool that wants to read them.
+    """
+    try:
+        source_bytes, _ = await fetch_object_bytes(body.url)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[convert/3mf] fetch failed: {exc}")
+        raise HTTPException(status_code=502, detail="Failed to download source file")
+
+    clean_url = body.url.split("?")[0]
+    src_ext = clean_url.rsplit(".", 1)[-1].lower() if "." in clean_url else "glb"
+
+    try:
+        mesh = _load_with_texture(source_bytes, src_ext)
+        logger.info(
+            f"[convert/3mf] loaded {src_ext}: {len(mesh.faces):,} faces, "
+            f"{len(mesh.vertices):,} verts, "
+            f"textured={getattr(getattr(mesh, 'visual', None), 'uv', None) is not None}"
+        )
+    except Exception as e:
+        logger.error(f"[convert/3mf] load failed: {e}")
+        raise HTTPException(status_code=422, detail=f"Could not parse mesh: {e}")
+
+    # Cluster / part-assign BEFORE prep — prep only touches transforms
+    # (center, scale), preserving face indexing.
+    t = time.time()
+    face_labels, palette = derive_face_labels(
+        mesh, filaments=filaments, part_face_ids=body.part_face_ids
+    )
+    logger.info(f"[convert/3mf] labels derived in {time.time() - t:.2f}s")
+
+    # Prep without decimation (face indexing must match labels). Repair
+    # is off — painted 3MF for Hunyuan output is for already-clean
+    # textured meshes.
+    mesh = _make_print_ready(
+        mesh,
+        target_size_mm=target_size_mm if target_size_mm and target_size_mm > 0 else None,
+        decimate_to=None,
+        do_repair=False,
+        do_center=center,
+    )
+
+    src_name = clean_url.rsplit("/", 1)[-1].rsplit(".", 1)[0] if "/" in clean_url else "model"
+    try:
+        out_bytes = write_painted_3mf(
+            mesh,
+            face_labels=face_labels,
+            palette=palette,
+            object_name=src_name,
+        )
+    except Exception as e:
+        logger.error(f"[convert/3mf] write failed: {e}")
+        raise HTTPException(status_code=500, detail=f"3MF write failed: {e}")
+
+    out_filename = f"{src_name}_painted.3mf"
+    logger.info(
+        f"[convert/3mf] wrote {out_filename}: "
+        f"{len(out_bytes):,} bytes, "
+        f"{len(palette) if palette else 1} filament(s)"
+    )
+
+    return StreamingResponse(
+        io.BytesIO(out_bytes),
+        media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
         headers={
             "Content-Disposition": f'attachment; filename="{out_filename}"',
             "Content-Length": str(len(out_bytes)),
