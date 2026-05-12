@@ -2,12 +2,13 @@ import logging
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_id
 from app.db.session import get_db
 from app.models.chat import Chat as ChatModel
+from app.models.message import Message as MessageModel
 from app.models.session import Session as SessionModel
 from app.schemas.chat import ChatRead
 from app.schemas.session import SessionRead
@@ -48,7 +49,27 @@ async def get_init(
     )
     chats = chat_result.scalars().all()
 
+    # 3. Per-chat message count in a single GROUP BY so the sidebar
+    # can render real `N msgs` totals without each chat having to
+    # full-sync its message history on click. Single roundtrip,
+    # indexed via the existing (chat_id, created_at) composite.
+    chat_ids = [c.id for c in chats]
+    counts: dict[str, int] = {}
+    if chat_ids:
+        count_result = await db.execute(
+            select(MessageModel.chat_id, func.count(MessageModel.id))
+            .where(MessageModel.chat_id.in_(chat_ids))
+            .group_by(MessageModel.chat_id)
+        )
+        counts = {chat_id: cnt for chat_id, cnt in count_result.all()}
+
+    chat_reads: list[ChatRead] = []
+    for c in chats:
+        cr = ChatRead.model_validate(c)
+        cr.message_count = counts.get(c.id, 0)
+        chat_reads.append(cr)
+
     return InitResponse(
         sessions=[SessionRead.model_validate(s) for s in sessions],
-        chats=[ChatRead.model_validate(c) for c in chats],
+        chats=chat_reads,
     )
