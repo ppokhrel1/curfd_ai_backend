@@ -45,6 +45,18 @@ from app.api.routes.gemini_openscad_generate_route import (
 )
 from app.api.routes.uploads import save_chat_image
 
+# Module-level logger. Most functions in this file do their own
+# `logger = logging.getLogger(__name__)` re-bind inside the function
+# body, but module-scope helpers like `_safe_send_json` and
+# `_upsert_picker_message` reference `logger` without that local
+# binding. Without this top-level declaration the helpers crashed
+# with NameError the first time they hit their error paths
+# (WebSocketDisconnect log, picker upsert error log) — see
+# https://github.com/ppokhrel1/curfd_ai_backend (the trace from
+# StringDataRightTruncationError on the picker DB write, and the
+# ClientDisconnected → NameError chain in _safe_send_json).
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
