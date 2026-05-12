@@ -1395,6 +1395,42 @@ async def _handle_generate_custom_image_ws(
         await _safe_send_json(websocket, err_event)
         return
 
+    # Cache fast-path: if we've generated this exact prompt before, the
+    # R2 lookup (~50-200 ms via asyncio.to_thread) returns the cached
+    # image and we skip both the `candidate_pending` event and the
+    # Gemini call entirely. User sees the image arrive in one shot
+    # instead of going through Generating… → REVIEW.
+    from app.services.openscad_agent.tools.image_gen import _quick_cache_lookup
+    cached_pre = await asyncio.to_thread(_quick_cache_lookup, custom_prompt, None)
+    if cached_pre is not None:
+        cached_url, cached_data_url = cached_pre
+        _append_picker_history(request_id, "generate", custom_prompt)
+        ready_event = {
+            "type": "image_to_3d.candidate_ready",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "display_url": cached_url,
+            "runpod_url": cached_data_url,
+            "source": "ai_generated",
+            "prompt": custom_prompt,
+        }
+        _cache_picker_result(request_id, ready_event)
+        await _upsert_picker_message(
+            chat_id=chat_id,
+            request_id=request_id,
+            payload_patch={
+                "candidate": {
+                    "url": cached_url,
+                    "runpod_url": cached_data_url,
+                    "source": "ai_generated",
+                    "prompt": custom_prompt,
+                },
+                "candidateError": None,
+            },
+        )
+        await _safe_send_json(websocket, ready_event)
+        return
+
     await _safe_send_json(websocket, {
         "type": "image_to_3d.candidate_pending",
         "chat_id": chat_id,
@@ -1402,7 +1438,13 @@ async def _handle_generate_custom_image_ws(
         "action": "generate",
     })
 
-    display_url, runpod_url, err = _gen_candidate_via_gemini(custom_prompt, "generate")
+    # `_gen_candidate_via_gemini` calls the sync google-genai SDK which
+    # blocks for 3-8 s. Offload to a thread so the event loop stays
+    # free — multiple concurrent picker submits now run in parallel
+    # via the threadpool instead of serializing on one event loop.
+    display_url, runpod_url, err = await asyncio.to_thread(
+        _gen_candidate_via_gemini, custom_prompt, "generate"
+    )
     if err or not display_url:
         err_event = {
             "type": "image_to_3d.candidate_error",
@@ -1485,10 +1527,14 @@ async def _handle_edit_candidate_ws(
         return
 
     # Load the current image into a PIL.Image so Gemini can use it as a
-    # multimodal reference. Helper handles both data: and http(s) sources.
-    from app.services.openscad_agent.tools.image_gen import _load_reference_image
+    # multimodal reference. Offload the HTTP fetch (could be slow for
+    # http URLs) — the load itself is sync and uses httpx internally.
+    from app.services.openscad_agent.tools.image_gen import (
+        _load_reference_image,
+        _quick_cache_lookup,
+    )
     try:
-        ref_image = _load_reference_image(image_url)
+        ref_image = await asyncio.to_thread(_load_reference_image, image_url)
     except Exception as e:
         err_event = {
             "type": "image_to_3d.candidate_error",
@@ -1500,17 +1546,11 @@ async def _handle_edit_candidate_ws(
         await _safe_send_json(websocket, err_event)
         return
 
-    await _safe_send_json(websocket, {
-        "type": "image_to_3d.candidate_pending",
-        "chat_id": chat_id,
-        "request_id": request_id,
-        "action": "edit",
-    })
-
-    # Thread prior session prompts into the Gemini edit so pronouns and
-    # compound directives resolve correctly. The user-typed `edit_prompt`
-    # is still what we cache + show in the UI; only the Gemini-bound
-    # prompt is augmented.
+    # Build the effective prompt (user's prompt + session context) so
+    # the cache key matches what we'd actually send to Gemini — without
+    # this, the cache key would be the raw user prompt but the cache
+    # store key (inside _gen_candidate_via_gemini) uses the effective
+    # prompt → cache populated by one call wouldn't hit the next.
     effective_prompt = _build_edit_prompt_with_context(request_id, edit_prompt)
     if effective_prompt != edit_prompt:
         logger.info(
@@ -1518,8 +1558,61 @@ async def _handle_edit_candidate_ws(
             f"({len(effective_prompt) - len(edit_prompt)} extra chars)"
         )
 
-    display_url, runpod_url, err = _gen_candidate_via_gemini(
-        [effective_prompt, ref_image], "edit"
+    # Cache fast-path for edits — same scheme as the generate handler.
+    # Hash includes the source image bytes so two edits on the same
+    # source with the same prompt collide; different sources don't.
+    def _ref_bytes_for_cache():
+        try:
+            buf = io.BytesIO()
+            ref_image.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            return None
+    ref_bytes = await asyncio.to_thread(_ref_bytes_for_cache)
+    cached_pre = await asyncio.to_thread(
+        _quick_cache_lookup, effective_prompt, ref_bytes
+    )
+    if cached_pre is not None:
+        cached_url, cached_data_url = cached_pre
+        _append_picker_history(request_id, "edit", edit_prompt)
+        ready_event = {
+            "type": "image_to_3d.candidate_ready",
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "display_url": cached_url,
+            "runpod_url": cached_data_url,
+            "source": "ai_edited",
+            "prompt": edit_prompt,
+        }
+        _cache_picker_result(request_id, ready_event)
+        await _upsert_picker_message(
+            chat_id=chat_id,
+            request_id=request_id,
+            payload_patch={
+                "candidate": {
+                    "url": cached_url,
+                    "runpod_url": cached_data_url,
+                    "source": "ai_edited",
+                    "prompt": edit_prompt,
+                },
+                "candidateError": None,
+            },
+        )
+        await _safe_send_json(websocket, ready_event)
+        return
+
+    await _safe_send_json(websocket, {
+        "type": "image_to_3d.candidate_pending",
+        "chat_id": chat_id,
+        "request_id": request_id,
+        "action": "edit",
+    })
+
+    # Offload the sync Gemini call to a thread so the event loop stays
+    # free during the 3-8 s API call. See _handle_generate_custom_image_ws
+    # for the same reasoning.
+    display_url, runpod_url, err = await asyncio.to_thread(
+        _gen_candidate_via_gemini, [effective_prompt, ref_image], "edit"
     )
     if err or not display_url:
         err_event = {

@@ -219,15 +219,48 @@ def _upload_to_r2(image_bytes: bytes, media_type: str) -> str | None:
     return url
 
 
+# Module-level singleton — the genai.Client carries TLS/HTTP session
+# state we want to reuse across requests. Creating a new one per call
+# costs ~10-50 ms and re-warms the connection pool for nothing.
+_GENAI_CLIENT = None
+
+
 def _client():
-    """Lazy `google.genai` client init — raises a clean error if key missing."""
+    """Return a shared `google.genai` client. Lazy + cached at module
+    scope so we pay the init cost once per worker, not per call."""
+    global _GENAI_CLIENT
+    if _GENAI_CLIENT is not None:
+        return _GENAI_CLIENT
     api_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
             "Gemini API key not configured (settings.gemini_api_key / GEMINI_API_KEY)."
         )
     from google import genai
-    return genai.Client(api_key=api_key)
+    _GENAI_CLIENT = genai.Client(api_key=api_key)
+    logger.info("[image_gen] genai.Client initialised (singleton)")
+    return _GENAI_CLIENT
+
+
+def _quick_cache_lookup(
+    prompt: str, ref_image_bytes: bytes | None = None
+) -> tuple[str, str] | None:
+    """Cache-only fast-path used by callers that want to know if a
+    Gemini call is even necessary before kicking off pending events
+    / UI spinners.
+
+    Returns (display_url, data_url) on hit, None on miss. Errors are
+    swallowed (caching is best-effort).
+    """
+    if not prompt or not prompt.strip():
+        return None
+    cache_key = _cache_key(prompt, ref_image_bytes)
+    cached = _try_cached_image(cache_key)
+    if cached is None:
+        return None
+    image_bytes, media_type, cached_url = cached
+    data_url = _bytes_to_data_url(image_bytes, media_type)
+    return cached_url, data_url
 
 
 def _extract_image_bytes(response) -> tuple[bytes, str] | None:
