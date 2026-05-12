@@ -1680,7 +1680,10 @@ async def _handle_image_selected_ws(
     logger = logging.getLogger(__name__)
 
     try:
-        logger.info(f"Starting 3D generation with selected image: {selected_url}")
+        logger.info(
+            f"Starting 3D generation with selected image: "
+            f"{_redact_for_log(selected_url)}"
+        )
         async with SessionLocal() as db:
             response = await _handle_image_to_3d_request(
                 chat_id=chat_id,
