@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
@@ -179,6 +180,21 @@ def _append_picker_history(request_id: str, action: str, prompt: str) -> None:
     session.append({"action": action, "prompt": prompt})
 
 
+def _strip_persistence_bloat(payload: dict | None) -> dict | None:
+    """Remove fields that bloat the persisted row without helping
+    rehydration. Currently strips `candidate.runpod_url` — that's the
+    base64 data URL the RunPod worker decodes inline; for UI rehydration
+    we only need `candidate.url` (the R2 public URL). Storing the data
+    URL pushed metadata_json over 1 MB per row in observation."""
+    if not payload:
+        return payload
+    cand = payload.get("candidate")
+    if isinstance(cand, dict) and "runpod_url" in cand:
+        cand = {k: v for k, v in cand.items() if k != "runpod_url"}
+        payload = {**payload, "candidate": cand}
+    return payload
+
+
 async def _upsert_picker_message(
     chat_id: str,
     request_id: str,
@@ -188,12 +204,10 @@ async def _upsert_picker_message(
 ) -> None:
     """Insert or update the persistent DB row backing this picker session.
 
-    The message id is forced to `img-search-{request_id}` so it matches
-    the id the frontend assigns to its in-memory picker — that way the
-    server-rehydrated message slots into the same place when the chat
-    is reloaded. Without this persistence the picker is purely client-
-    side and a page reload makes the candidate invisible (even though
-    the R2 URL is still durable — see _PICKER_SESSIONS / R2 cache).
+    Message id is the bare `request_id` (a UUID, 36 chars) so it fits
+    the messages.id VARCHAR(36) column. Earlier attempt used
+    `img-search-{request_id}` (47 chars) and overflowed the column —
+    StringDataRightTruncationError.
 
     Pass either:
       - `image_search_payload=…` to set the whole payload (e.g. at picker
@@ -202,12 +216,18 @@ async def _upsert_picker_message(
         after candidate_ready, when we only want to add the candidate
         field without overwriting image_urls).
 
+    Picker candidates persisted here drop `runpod_url` (the data URL
+    only used during the RunPod send) — see _strip_persistence_bloat.
+
     All errors are swallowed: persistence is a UX-niceness, not a
     correctness requirement. WS delivery is still the primary path.
     """
     if not chat_id or not request_id:
         return
-    msg_id = f"img-search-{request_id}"
+    msg_id = request_id
+    # Logger here would otherwise NameError — this helper runs at module
+    # scope and chat_stream.py doesn't define a module-level `logger`.
+    _logger = logging.getLogger(__name__)
     try:
         async with SessionLocal() as db:
             existing = await db.get(MessageModel, msg_id)
@@ -215,6 +235,7 @@ async def _upsert_picker_message(
                 merged = dict(image_search_payload or {})
                 if payload_patch:
                     merged.update(payload_patch)
+                merged = _strip_persistence_bloat(merged)
                 db.add(MessageModel(
                     id=msg_id,
                     chat_id=chat_id,
@@ -233,13 +254,13 @@ async def _upsert_picker_message(
                     current_payload = dict(image_search_payload)
                 if payload_patch:
                     current_payload.update(payload_patch)
-                meta["image_search_payload"] = current_payload
+                meta["image_search_payload"] = _strip_persistence_bloat(current_payload)
                 existing.metadata_json = meta
                 if content and not existing.content:
                     existing.content = content
             await db.commit()
     except Exception as e:
-        logger.warning(f"[picker persist] upsert failed for {msg_id}: {e}")
+        _logger.warning(f"[picker persist] upsert failed for {msg_id}: {e}")
 
 
 def _build_edit_prompt_with_context(request_id: str, edit_prompt: str) -> str:
