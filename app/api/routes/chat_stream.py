@@ -2665,3 +2665,20 @@ async def chat_socket(
             )
     except WebSocketDisconnect:
         await chat_socket_manager.disconnect(chat_id, websocket)
+    except RuntimeError as e:
+        # Starlette raises `WebSocket is not connected. Need to call
+        # "accept" first.` from receive_text() when the application
+        # state isn't CONNECTED — that happens both pre-accept (a true
+        # bug) AND when the client disconnected mid-handshake or right
+        # after accept(), before our first receive_text(). In our case
+        # accept() ran (chat_socket_manager.connect awaited it), so
+        # this branch fires only on the race condition. Treat as a
+        # normal disconnect; anything else re-raises.
+        msg = str(e)
+        if "not connected" in msg or "accept" in msg:
+            logger.debug(
+                f"[chat_socket] client disconnected before first message: {e}"
+            )
+            await chat_socket_manager.disconnect(chat_id, websocket)
+        else:
+            raise
