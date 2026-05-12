@@ -16,6 +16,7 @@ the chat UI can render the image inline.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import logging
 import os
@@ -28,6 +29,100 @@ from langchain_core.tools import tool
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ─── R2 prompt-keyed cache for Gemini-generated images ───────────────────────
+# Gemini image calls cost real money per request. Identical prompts (and
+# for edits, identical source image + edit prompt) produce essentially
+# identical outputs, so we cache by content-addressed key in R2 and serve
+# the cached bytes on subsequent calls instead of re-paying for Gemini.
+#
+# Cache is durable (no TTL — R2 storage is ~$0.015/GB/month, far cheaper
+# than even one Gemini image call). If we need to invalidate, change
+# `_CACHE_PREFIX` or rotate per-deployment.
+
+_CACHE_PREFIX = "generated_images_cache"
+
+
+def _cache_key(prompt: str, ref_image_bytes: bytes | None = None) -> str:
+    """Build a deterministic R2 key from the prompt (+ optional reference
+    image for edits). Two requests with the same prompt and the same
+    source image collide on this key intentionally — that's the cache."""
+    h = hashlib.sha256()
+    h.update(prompt.strip().encode("utf-8"))
+    if ref_image_bytes:
+        h.update(b"|ref|")
+        h.update(hashlib.sha256(ref_image_bytes).digest())
+    return f"{_CACHE_PREFIX}/{h.hexdigest()[:32]}.png"
+
+
+def _public_url_for_key(key: str) -> str:
+    return (
+        f"https://{settings.r2_account_id}.r2.cloudflarestorage.com/"
+        f"{settings.r2_bucket_name}/{key}"
+    )
+
+
+def _try_cached_image(cache_key: str) -> tuple[bytes, str, str] | None:
+    """Look up a cached image in R2.
+
+    Returns (image_bytes, media_type, public_url) on hit, None on miss
+    (or if R2 isn't configured / errors). All errors are non-fatal —
+    caller falls through to a fresh Gemini call.
+    """
+    try:
+        from app.api.routes.storage_proxy import _get_r2_client
+    except Exception:
+        return None
+    client = _get_r2_client()
+    if client is None or not settings.r2_bucket_name:
+        return None
+    try:
+        resp = client.get_object(Bucket=settings.r2_bucket_name, Key=cache_key)
+        body = resp["Body"].read()
+        media_type = resp.get("ContentType") or "image/png"
+        logger.info(
+            f"[image_gen] cache HIT for {cache_key} ({len(body)} bytes, "
+            f"saved one Gemini call)"
+        )
+        return body, media_type, _public_url_for_key(cache_key)
+    except Exception as e:
+        # NoSuchKey surfaces differently across boto3 versions / R2 — treat
+        # any not-found-shaped error as a clean miss, log others.
+        msg = str(e).lower()
+        if "nosuchkey" in msg or "not found" in msg or "404" in msg:
+            return None
+        logger.warning(f"[image_gen] cache lookup error (treating as miss): {e}")
+        return None
+
+
+def _store_cached_image(
+    cache_key: str, image_bytes: bytes, media_type: str
+) -> str | None:
+    """Write a generated image to the deterministic cache key. Returns
+    the public URL on success. Best-effort — failure here means future
+    requests will re-pay for Gemini, but the current request still
+    succeeds via the regular (uuid-keyed) upload path."""
+    try:
+        from app.api.routes.storage_proxy import _get_r2_client
+    except Exception:
+        return None
+    client = _get_r2_client()
+    if client is None or not settings.r2_bucket_name:
+        return None
+    try:
+        client.put_object(
+            Bucket=settings.r2_bucket_name,
+            Key=cache_key,
+            Body=image_bytes,
+            ContentType=media_type,
+        )
+    except Exception as e:
+        logger.error(f"[image_gen] cache put_object failed: {e}")
+        return None
+    url = _public_url_for_key(cache_key)
+    logger.info(f"[image_gen] cache STORE for {cache_key} ({len(image_bytes)} bytes)")
+    return url
 
 # Image-capable Gemini models. Naming has churned: the original "nano
 # banana" preview was `gemini-2.5-flash-image-preview`; some accounts /
@@ -311,7 +406,13 @@ def _load_reference_image(image_url: str):
     raise ValueError(f"Unsupported image_url scheme: {image_url[:30]}…")
 
 
-def _format_tool_result(prompt: str, image_bytes: bytes, media_type: str, action: str) -> str:
+def _format_tool_result(
+    prompt: str,
+    image_bytes: bytes,
+    media_type: str,
+    action: str,
+    public_url: str | None = None,
+) -> str:
     """Wrap result so the agent loop's image-extraction regex picks it up.
 
     Two sentinels:
@@ -323,9 +424,13 @@ def _format_tool_result(prompt: str, image_bytes: bytes, media_type: str, action
         UI via the image.generated stream event so messages don't carry
         multi-MB base64 in localStorage. Only present when R2 upload
         succeeded; the chat UI falls back to the data URL otherwise.
+
+    When `public_url` is supplied (e.g. cache hit served the cached
+    URL directly), we skip the fresh upload entirely and reuse it.
     """
     data_url = _bytes_to_data_url(image_bytes, media_type)
-    public_url = _upload_to_r2(image_bytes, media_type)
+    if public_url is None:
+        public_url = _upload_to_r2(image_bytes, media_type)
 
     parts = [
         f"{action.capitalize()}d image for prompt: {prompt!r}.",
@@ -353,6 +458,16 @@ def generate_image(prompt: str) -> str:
     """
     if not prompt or not prompt.strip():
         return "generate_image error: prompt is empty."
+
+    # Cache lookup — identical prompts skip the Gemini call entirely.
+    cache_key = _cache_key(prompt)
+    cached = _try_cached_image(cache_key)
+    if cached is not None:
+        image_bytes, media_type, cached_url = cached
+        return _format_tool_result(
+            prompt, image_bytes, media_type, "generate", public_url=cached_url
+        )
+
     try:
         client = _client()
         response, _model_used = _generate_with_fallback(client, prompt)
@@ -373,7 +488,13 @@ def generate_image(prompt: str) -> str:
         f"[image_gen] generate_image OK ({len(image_bytes)} bytes, {media_type}) "
         f"prompt={prompt[:80]!r}"
     )
-    return _format_tool_result(prompt, image_bytes, media_type, "generate")
+    # Store in the deterministic cache key so the next identical prompt
+    # is a free hit. The cached URL also becomes the public URL for this
+    # response, so we don't pay for a second (uuid-keyed) upload.
+    cached_url = _store_cached_image(cache_key, image_bytes, media_type)
+    return _format_tool_result(
+        prompt, image_bytes, media_type, "generate", public_url=cached_url
+    )
 
 
 @tool
@@ -403,6 +524,27 @@ def edit_image(image_url: str, prompt: str) -> str:
     except Exception as e:
         return f"edit_image error: could not load source image: {e}"
 
+    # Build cache key from prompt + source image bytes so the same edit
+    # on the same image collides on the same R2 object. Re-encode the
+    # PIL image to a stable byte representation for hashing.
+    ref_bytes_for_hash: bytes | None = None
+    try:
+        buf = io.BytesIO()
+        ref_image.save(buf, format="PNG")
+        ref_bytes_for_hash = buf.getvalue()
+    except Exception as e:
+        logger.warning(
+            f"[image_gen] couldn't hash source image for cache key ({e}); "
+            f"proceeding without ref-image hash"
+        )
+    cache_key = _cache_key(prompt, ref_bytes_for_hash)
+    cached = _try_cached_image(cache_key)
+    if cached is not None:
+        image_bytes, media_type, cached_url = cached
+        return _format_tool_result(
+            prompt, image_bytes, media_type, "edit", public_url=cached_url
+        )
+
     try:
         client = _client()
         response, _model_used = _generate_with_fallback(client, [prompt, ref_image])
@@ -421,4 +563,7 @@ def edit_image(image_url: str, prompt: str) -> str:
         f"[image_gen] edit_image OK ({len(image_bytes)} bytes, {media_type}) "
         f"prompt={prompt[:80]!r}"
     )
-    return _format_tool_result(prompt, image_bytes, media_type, "edit")
+    cached_url = _store_cached_image(cache_key, image_bytes, media_type)
+    return _format_tool_result(
+        prompt, image_bytes, media_type, "edit", public_url=cached_url
+    )

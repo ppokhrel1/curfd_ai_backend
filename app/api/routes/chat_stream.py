@@ -179,6 +179,69 @@ def _append_picker_history(request_id: str, action: str, prompt: str) -> None:
     session.append({"action": action, "prompt": prompt})
 
 
+async def _upsert_picker_message(
+    chat_id: str,
+    request_id: str,
+    image_search_payload: dict | None = None,
+    payload_patch: dict | None = None,
+    content: str | None = None,
+) -> None:
+    """Insert or update the persistent DB row backing this picker session.
+
+    The message id is forced to `img-search-{request_id}` so it matches
+    the id the frontend assigns to its in-memory picker — that way the
+    server-rehydrated message slots into the same place when the chat
+    is reloaded. Without this persistence the picker is purely client-
+    side and a page reload makes the candidate invisible (even though
+    the R2 URL is still durable — see _PICKER_SESSIONS / R2 cache).
+
+    Pass either:
+      - `image_search_payload=…` to set the whole payload (e.g. at picker
+        creation, when we have image_urls + search_query + request_id).
+      - `payload_patch=…` to merge fields into the existing payload (e.g.
+        after candidate_ready, when we only want to add the candidate
+        field without overwriting image_urls).
+
+    All errors are swallowed: persistence is a UX-niceness, not a
+    correctness requirement. WS delivery is still the primary path.
+    """
+    if not chat_id or not request_id:
+        return
+    msg_id = f"img-search-{request_id}"
+    try:
+        async with SessionLocal() as db:
+            existing = await db.get(MessageModel, msg_id)
+            if existing is None:
+                merged = dict(image_search_payload or {})
+                if payload_patch:
+                    merged.update(payload_patch)
+                db.add(MessageModel(
+                    id=msg_id,
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=content or "Image picker",
+                    metadata_json={
+                        "action": "picker",
+                        "image_search_payload": merged,
+                    },
+                ))
+            else:
+                meta = dict(existing.metadata_json or {})
+                meta["action"] = "picker"
+                current_payload = dict(meta.get("image_search_payload") or {})
+                if image_search_payload is not None:
+                    current_payload = dict(image_search_payload)
+                if payload_patch:
+                    current_payload.update(payload_patch)
+                meta["image_search_payload"] = current_payload
+                existing.metadata_json = meta
+                if content and not existing.content:
+                    existing.content = content
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[picker persist] upsert failed for {msg_id}: {e}")
+
+
 def _build_edit_prompt_with_context(request_id: str, edit_prompt: str) -> str:
     """Prepend recent picker history to an edit prompt so Gemini has
     the full session context for compound edits.
@@ -1004,6 +1067,25 @@ async def _handle_image_to_3d_ws_task(
 
             request_id = str(_uuid.uuid4())
 
+            # Persist the picker as a real chat message so reloads
+            # restore it (with whatever candidate the user produces
+            # later, once candidate_ready also upserts).
+            initial_payload = {
+                "image_urls": candidates,
+                "search_query": search_query,
+                "request_id": request_id,
+                "prompt": i3d_payload.prompt or "",
+            }
+            await _upsert_picker_message(
+                chat_id=chat_id,
+                request_id=request_id,
+                image_search_payload=initial_payload,
+                content=(
+                    f"Found {len(candidates)} reference images for "
+                    f"\"{search_query or i3d_payload.prompt or ''}\""
+                ),
+            )
+
             # Send image options to frontend — user picks via image_to_3d.image_selected
             await _safe_send_json(websocket, {
                 "type": "image_to_3d.image_options",
@@ -1178,18 +1260,60 @@ def _gen_candidate_via_gemini(
     `display_url` is what the picker should render (R2 if available, else
     data URL). `runpod_url` is always a data URL — the worker decodes it
     inline so we never have to expose private R2 to RunPod. `error` is a
-    user-friendly string when generation failed, otherwise empty."""
+    user-friendly string when generation failed, otherwise empty.
+
+    Checks the prompt-keyed R2 cache before calling Gemini. Identical
+    prompts (and for edits, identical source image + edit prompt) skip
+    the API call and serve the cached bytes directly. See
+    `image_gen._cache_key` / `_try_cached_image` for the cache scheme.
+    """
+    import io as _io
     import logging
     logger = logging.getLogger(__name__)
 
     from app.services.openscad_agent.tools.image_gen import (
         _bytes_to_data_url,
+        _cache_key,
         _client,
         _extract_image_bytes,
         _generate_with_fallback,
         _refusal_summary,
+        _store_cached_image,
+        _try_cached_image,
         _upload_to_r2,
     )
+
+    # Derive cache key from contents — same hashing rules as the agent
+    # tool paths. `contents` is either a plain prompt string (generate)
+    # or [prompt, PIL.Image] (edit).
+    cache_prompt: str | None = None
+    cache_ref_bytes: bytes | None = None
+    try:
+        if isinstance(contents, str):
+            cache_prompt = contents
+        elif isinstance(contents, (list, tuple)) and contents:
+            for item in contents:
+                if isinstance(item, str) and cache_prompt is None:
+                    cache_prompt = item
+                elif hasattr(item, "save") and cache_ref_bytes is None:
+                    buf = _io.BytesIO()
+                    item.save(buf, format="PNG")
+                    cache_ref_bytes = buf.getvalue()
+    except Exception as e:
+        logger.warning(f"[i2i {purpose}] cache-key build skipped: {e}")
+        cache_prompt = None
+
+    cache_key = _cache_key(cache_prompt, cache_ref_bytes) if cache_prompt else None
+    if cache_key:
+        cached = _try_cached_image(cache_key)
+        if cached is not None:
+            image_bytes, media_type, cached_url = cached
+            data_url = _bytes_to_data_url(image_bytes, media_type)
+            logger.info(
+                f"[i2i {purpose}] cache HIT — skipping Gemini "
+                f"({len(image_bytes)} bytes)"
+            )
+            return cached_url, data_url, ""
 
     try:
         client = _client()
@@ -1208,12 +1332,21 @@ def _gen_candidate_via_gemini(
         return None, None, reason
 
     image_bytes, media_type = extracted
-    public_url = _upload_to_r2(image_bytes, media_type)
+    # Store at the deterministic cache key when we have one; otherwise
+    # fall back to the uuid-keyed upload. Either way the URL becomes
+    # display_url. We don't double-upload — cache key serves both
+    # cache and public-URL roles when present.
+    public_url: str | None = None
+    if cache_key:
+        public_url = _store_cached_image(cache_key, image_bytes, media_type)
+    if public_url is None:
+        public_url = _upload_to_r2(image_bytes, media_type)
     data_url = _bytes_to_data_url(image_bytes, media_type)
     display_url = public_url or data_url
     logger.info(
         f"[i2i {purpose}] candidate ready ({len(image_bytes)} bytes, "
-        f"chat={'r2' if public_url else 'data-url'})"
+        f"chat={'r2' if public_url else 'data-url'}, "
+        f"cached={'yes' if cache_key and public_url else 'no'})"
     )
     return display_url, data_url, ""
 
@@ -1259,6 +1392,11 @@ async def _handle_generate_custom_image_ws(
         # Cache BEFORE sending so the REST-recovery path works even when
         # the WS send raises mid-task (server reload, broken pipe).
         _cache_picker_result(request_id, err_event)
+        await _upsert_picker_message(
+            chat_id=chat_id,
+            request_id=request_id,
+            payload_patch={"candidateError": err or "Generation failed"},
+        )
         await _safe_send_json(websocket, err_event)
         return
 
@@ -1276,6 +1414,19 @@ async def _handle_generate_custom_image_ws(
         "prompt": custom_prompt,
     }
     _cache_picker_result(request_id, ready_event)
+    await _upsert_picker_message(
+        chat_id=chat_id,
+        request_id=request_id,
+        payload_patch={
+            "candidate": {
+                "url": display_url,
+                "runpod_url": runpod_url,
+                "source": "ai_generated",
+                "prompt": custom_prompt,
+            },
+            "candidateError": None,
+        },
+    )
     await _safe_send_json(websocket, ready_event)
 
 
@@ -1357,6 +1508,11 @@ async def _handle_edit_candidate_ws(
             "message": err or "Edit failed",
         }
         _cache_picker_result(request_id, err_event)
+        await _upsert_picker_message(
+            chat_id=chat_id,
+            request_id=request_id,
+            payload_patch={"candidateError": err or "Edit failed"},
+        )
         await _safe_send_json(websocket, err_event)
         return
 
@@ -1375,6 +1531,19 @@ async def _handle_edit_candidate_ws(
         "prompt": edit_prompt,
     }
     _cache_picker_result(request_id, ready_event)
+    await _upsert_picker_message(
+        chat_id=chat_id,
+        request_id=request_id,
+        payload_patch={
+            "candidate": {
+                "url": display_url,
+                "runpod_url": runpod_url,
+                "source": "ai_edited",
+                "prompt": edit_prompt,
+            },
+            "candidateError": None,
+        },
+    )
     await _safe_send_json(websocket, ready_event)
 
 
