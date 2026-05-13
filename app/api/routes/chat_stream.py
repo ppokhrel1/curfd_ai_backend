@@ -37,6 +37,21 @@ from app.schemas.message import MessageRead
 from app.schemas.runpod import ChatRunpodRequest, ChatRunpodResponse, ImageTo3DRequest, ImageTo3DResponse
 from app.services.chat_socket import chat_socket_manager
 from app.services.runpod import get_runpod_client, get_image_to_3d_client
+from app.services.modal_client import get_image_to_3d_modal_client
+
+
+def _get_image_to_3d_client():
+    """Pick Modal or RunPod for `action="image_to_3d"` based on config.
+
+    All other actions (modify_mesh, inpaint) keep using
+    `get_image_to_3d_client()` → RunPod, since only image_to_3d has been
+    ported to Modal. Set IMAGE_TO_3D_BACKEND=modal in .env to switch;
+    flip back to runpod for an instant rollback.
+    """
+    from app.core.config import settings
+    if settings.image_to_3d_backend.lower() == "modal":
+        return get_image_to_3d_modal_client()
+    return get_image_to_3d_client()
 from app.services.openscad_agent import run_agent_stream
 from app.api.routes.gemini_openscad_generate_route import (
     _build_lc_history,
@@ -1007,7 +1022,8 @@ async def _handle_image_to_3d_request(
     await db.refresh(user_message)
 
     try:
-        client = get_image_to_3d_client()
+        # Modal or RunPod, controlled by IMAGE_TO_3D_BACKEND env var.
+        client = _get_image_to_3d_client()
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1956,7 +1972,10 @@ async def _runpod_poll_and_emit(
         if runpod_client is not None:
             client = runpod_client
         elif action == "image_to_3d":
-            client = get_image_to_3d_client()
+            # Routes to Modal or RunPod based on IMAGE_TO_3D_BACKEND. The
+            # polling loop is shape-compatible across both — ModalClient
+            # returns the same status dict that get_status emitted before.
+            client = _get_image_to_3d_client()
         else:
             client = get_runpod_client()
     except ValueError as exc:
@@ -2398,12 +2417,13 @@ async def _handle_openscad_ws(
                         "status": event["status"],
                     })
                 elif event["type"] == "image_to_3d.trigger":
-                    # Agent wants to generate 3D from image — submit RunPod job
+                    # Agent wants to generate 3D from image — submit job
+                    # to whichever backend IMAGE_TO_3D_BACKEND selects.
                     trigger_data = event["data"]
                     image_url = trigger_data.get("image_url")
                     if image_url:
                         try:
-                            i3d_client = get_image_to_3d_client()
+                            i3d_client = _get_image_to_3d_client()
                             i3d_response = await i3d_client.start_raw_job({
                                 "action": "image_to_3d",
                                 "image_url": image_url,

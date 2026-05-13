@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     image_to_3d_runpod_api_token: str | None = None  # Falls back to runpod_api_token
     image_to_3d_timeout_seconds: int = 600
 
+    # Image-to-3D backend selector. Flip between providers without
+    # touching code — set IMAGE_TO_3D_BACKEND=modal in .env to route
+    # `action="image_to_3d"` to a Modal endpoint, or =runpod (default)
+    # for the existing RunPod serverless flow. modify_mesh / inpaint
+    # stay on RunPod regardless.
+    image_to_3d_backend: str = "runpod"
+    modal_image_to_3d_url: str | None = None  # e.g. https://ppokhrel1--curfdai-ml-web.modal.run
+    # Bearer token expected by the Modal endpoint's auth middleware.
+    # Must match the `API_KEY` set in the Modal Secret `curfdai-ml`.
+    # If unset, the client sends no Authorization header.
+    modal_image_to_3d_api_key: str | None = None
+
     # Backblaze B2 object storage (legacy — kept for fallback during R2 migration)
     b2_key_id: str | None = None
     b2_application_key: str | None = None
