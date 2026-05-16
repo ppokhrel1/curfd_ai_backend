@@ -181,6 +181,56 @@ async def debug_storage():
     }
 
 
+@router.get("/sign/{bucket}/{file_path:path}")
+async def sign_storage_url(
+    bucket: str = Path(...),
+    file_path: str = Path(...),
+    expires_in: int = 7 * 24 * 3600,
+):
+    """Return a 302 redirect to a fresh SigV4 presigned R2 URL.
+
+    Use this for assets whose original presigned URL has expired (or
+    bare URLs that were never signed). The endpoint signs a NEW 7-day
+    URL on every call, so the effective expiry is unlimited — the
+    frontend can hit this endpoint at any time and follow the
+    redirect to fetch the bytes directly from R2.
+
+    Trade-off vs proxy_storage_file (the streaming endpoint):
+      - sign/<path>   :  one backend hop (signature gen, microseconds)
+                         + one R2 hop (browser follows redirect).
+                         Backend never touches the asset bytes.
+      - <path>        :  one backend hop that ALSO streams the bytes.
+                         Slower, more backend egress, same auth model.
+
+    Use the streaming endpoint as a fallback when CORS or
+    redirect-following isn't an option for the caller.
+    """
+    if not _r2_configured():
+        # No R2 → can't generate a signed URL; fall through to the
+        # streaming proxy.
+        raise HTTPException(
+            status_code=503,
+            detail="R2 is not configured; use the streaming /storage endpoint instead",
+        )
+    client = _get_r2_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="R2 client unavailable")
+    target_bucket = settings.r2_bucket_name or bucket
+    # SigV4 max is 7 days. Clamp request to that ceiling.
+    expires_in = max(60, min(expires_in, 7 * 24 * 3600))
+    try:
+        url = client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": target_bucket, "Key": file_path},
+            ExpiresIn=expires_in,
+        )
+    except Exception as e:
+        logger.error(f"[storage/sign] presign failed for {target_bucket}/{file_path}: {e}")
+        raise HTTPException(status_code=502, detail="Presign failed")
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=url, status_code=302)
+
+
 @router.api_route("/{bucket}/{file_path:path}", methods=["GET", "HEAD"])
 async def proxy_storage_file(
     bucket: str = Path(...),
