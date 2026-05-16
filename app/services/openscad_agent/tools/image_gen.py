@@ -412,29 +412,78 @@ def _bytes_to_data_url(image_bytes: bytes, media_type: str) -> str:
     return f"data:{media_type};base64,{b64}"
 
 
+def _bytes_to_pil(data: bytes, source: str):
+    """Open `data` as a PIL image with a descriptive error on failure.
+
+    PIL's default UnidentifiedImageError truncates the offending bytes,
+    so when the upstream returned XML/HTML (e.g. an R2 auth error page
+    instead of an image) the message gives no useful hint. We sniff
+    the head of the payload and surface what we got.
+    """
+    from PIL import Image, UnidentifiedImageError
+    try:
+        return Image.open(io.BytesIO(data))
+    except UnidentifiedImageError:
+        head = data[:200].decode("utf-8", errors="replace") if data else "<empty>"
+        raise ValueError(
+            f"Response from {source} is not an image (got {len(data)} bytes; "
+            f"head: {head!r})"
+        )
+
+
 def _data_url_to_pil(data_url: str):
     """Decode a `data:image/...;base64,...` URL into a PIL Image."""
-    from PIL import Image
     if not data_url.startswith("data:"):
         raise ValueError("expected a data: URL")
     _, payload = data_url.split(",", 1)
-    return Image.open(io.BytesIO(base64.b64decode(payload)))
+    return _bytes_to_pil(base64.b64decode(payload), "data URL")
 
 
 def _fetch_url_to_pil(url: str, timeout: float = 15.0):
-    """GET an http(s) URL and return a PIL Image."""
-    from PIL import Image
+    """GET a public http(s) URL and return a PIL Image."""
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
         resp = client.get(url)
         resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content))
+    return _bytes_to_pil(resp.content, url)
+
+
+def _is_our_storage_url(url: str) -> bool:
+    return (
+        ".r2.cloudflarestorage.com/" in url
+        or ".backblazeb2.com/" in url
+    )
+
+
+def _fetch_authenticated_to_pil(url: str):
+    """Fetch from our own R2/B2 bucket using the storage_proxy's
+    authenticated boto client. Required because R2 URLs require AWS
+    SigV4 signatures — an unauthenticated GET returns an XML error
+    body that PIL can't parse, surfacing as a confusing 'cannot
+    identify image file' error in callers.
+    """
+    from app.api.routes.storage_proxy import _fetch_r2, _parse_storage_url
+    bucket, key = _parse_storage_url(url)
+    result = _fetch_r2(bucket, key)
+    if result is None:
+        # R2 miss — fall through to plain httpx (works for backblaze
+        # friendly URLs that don't require auth).
+        return _fetch_url_to_pil(url)
+    body, _ct = result
+    return _bytes_to_pil(body, f"R2 {bucket}/{key}")
 
 
 def _load_reference_image(image_url: str):
-    """Accept either a data URL or http(s) URL and return a PIL.Image."""
+    """Accept a data URL or http(s) URL and return a PIL.Image.
+
+    Routes our own R2/B2 URLs through the authenticated storage_proxy
+    client so signed requests are issued. Anything else goes through
+    plain httpx — public Pinterest/Reddit/CDN URLs work as before.
+    """
     if image_url.startswith("data:"):
         return _data_url_to_pil(image_url)
     if image_url.startswith("http://") or image_url.startswith("https://"):
+        if _is_our_storage_url(image_url):
+            return _fetch_authenticated_to_pil(image_url)
         return _fetch_url_to_pil(image_url)
     raise ValueError(f"Unsupported image_url scheme: {image_url[:30]}…")
 
