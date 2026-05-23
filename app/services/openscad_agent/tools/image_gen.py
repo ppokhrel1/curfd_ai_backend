@@ -125,14 +125,18 @@ def _store_cached_image(
     return url
 
 # Image-capable Gemini models. Naming has churned: the original "nano
-# banana" preview was `gemini-2.5-flash-image-preview`; some accounts /
-# regions / API versions only expose the GA name `gemini-2.5-flash-image`,
-# and the older v2 preview is still common. We try the user-configured one
-# first, then fall back to known siblings on 404 so a regional naming
-# change doesn't break the tool. Override with GEMINI_IMAGE_MODEL.
-_DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image"
+# banana" preview was `gemini-2.5-flash-image-preview`; the GA name is
+# `gemini-2.5-flash-image`; the newer "nano banana pro" is
+# `gemini-3-pro-image-preview` and renders fine geometric detail
+# (through-holes, internal cavities, sharp silhouettes) much more
+# reliably than 2.5-flash-image — important for downstream 3D
+# reconstruction with Hunyuan. We try Pro first, then fall back to
+# 2.5 family on 404 so a regional naming change doesn't break the tool.
+# Override with GEMINI_IMAGE_MODEL.
+_DEFAULT_IMAGE_MODEL = "gemini-3-pro-image-preview"
 _PRIMARY_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", _DEFAULT_IMAGE_MODEL)
 _IMAGE_MODEL_FALLBACKS = [
+    "gemini-3-pro-image-preview",
     "gemini-2.5-flash-image",
     "gemini-2.5-flash-image-preview",
     "gemini-2.0-flash-preview-image-generation",

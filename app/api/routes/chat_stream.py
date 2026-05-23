@@ -357,6 +357,74 @@ async def _upsert_picker_message(
         _logger.warning(f"[picker persist] upsert failed for {msg_id}: {e}")
 
 
+# Preamble we wrap around every picker-bound Gemini prompt so the
+# resulting image plays well with downstream Hunyuan3D reconstruction.
+# Each directive maps to a real failure mode we've observed:
+#
+#   - Reflective / glossy / mirror surfaces → Hunyuan's photometric
+#     stereo can't separate texture from environment reflection,
+#     producing baked-in highlights that look like dark blobs in 3D.
+#   - Transparent / glass / smoke → DiT collapses transparency into
+#     either solid mass or holes; either way the silhouette is wrong.
+#   - Hard rim / back lighting → confuses surface normal estimation,
+#     creates concave gouges where the model misreads shadow as form.
+#   - Motion blur / DoF blur → Hunyuan needs sharp edges to detect
+#     silhouette; blurred regions become rounded or missing.
+#   - Crops + objects bleeding off-frame → reconstructed mesh has
+#     truncated geometry; faces facing away from camera lose detail.
+#   - Busy backgrounds → background patterns leak into the painted
+#     texture because the segmentation step (rembg) isn't perfect.
+#   - Tiny faces (figure too far away) → face features under ~80 px
+#     get smoothed to a featureless oval by the mesh decimation pass.
+_HUNYUAN_FRIENDLY_PREAMBLE = (
+    "Render this for high-fidelity 3D model reconstruction. Critical "
+    "requirements (treat as hard constraints, not stylistic suggestions):\n"
+    "- One subject, centered, fully in frame with margin on all sides "
+    "(no parts cropped or touching the edge).\n"
+    "- Plain background — pure white or a neutral soft-grey gradient. "
+    "No patterns, props, text, or scenery.\n"
+    "- Even, diffuse, soft front-lighting from slightly above. No hard "
+    "directional shadows, no rim lighting, no backlight, no harsh contrast.\n"
+    "- Matte / non-reflective surfaces. Never use chrome, polished metal, "
+    "mirror, glass, water, transparent fabric, smoke, or specular highlights. "
+    "If the subject is naturally shiny, render it as a matte painted prop.\n"
+    "- Sharp focus across the entire subject. No motion blur, no depth-of-"
+    "field blur, no soft-focus, no film grain, no atmospheric haze.\n"
+    "- High photographic detail on face / hands / texture / clean silhouette "
+    "edges. For figures: face must be at least 25% of frame height with "
+    "eyes, nose, mouth, and ears clearly visible; prefer a slight 3/4 view "
+    "over pure profile so both sides of the face are visible.\n"
+    "- Clothing and accessories should have visible fabric grain / seams / "
+    "edges. Avoid cloth physics tricks (flowing capes, dynamic hair) — "
+    "static, balanced pose.\n"
+    "- No floating elements detached from the main body. No translucent "
+    "auras, particles, magic effects, or partial fade-outs.\n"
+    "- Hollow geometry and through-holes MUST be visibly rendered as actual "
+    "openings, not painted-on dark patches. If the subject has a bore, "
+    "mouth, nostril, chimney, spout, tube, channel, or any cavity that "
+    "passes through the body, choose a viewpoint where at least one end "
+    "of that opening is clearly visible as a recessed hole with depth and "
+    "interior shadow. Examples that frequently fail: a tobacco pipe with "
+    "no visible bore at the mouthpiece or bowl, a flute / recorder with a "
+    "closed mouthpiece, a vase or cup rendered as a solid block, a ring "
+    "with no central hole. Show the opening.\n"
+    "Subject: "
+)
+
+
+def _wrap_prompt_for_3d(user_prompt: str) -> str:
+    """Prepend the Hunyuan-friendly preamble unless the user has opted
+    out via the IMAGE_GEN_PROMPT_PREAMBLE env (e.g. set it to '' for
+    raw mode in tests)."""
+    import os as _os
+    override = _os.environ.get("IMAGE_GEN_PROMPT_PREAMBLE")
+    if override is not None:
+        if not override.strip():
+            return user_prompt
+        return f"{override.rstrip()}\n\nSubject: {user_prompt}"
+    return f"{_HUNYUAN_FRIENDLY_PREAMBLE}{user_prompt}"
+
+
 def _build_edit_prompt_with_context(request_id: str, edit_prompt: str) -> str:
     """Prepend recent picker history to an edit prompt so Gemini has
     the full session context for compound edits.
@@ -1578,7 +1646,7 @@ async def _handle_generate_custom_image_ws(
     # free — multiple concurrent picker submits now run in parallel
     # via the threadpool instead of serializing on one event loop.
     display_url, runpod_url, err = await asyncio.to_thread(
-        _gen_candidate_via_gemini, custom_prompt, "generate"
+        _gen_candidate_via_gemini, _wrap_prompt_for_3d(custom_prompt), "generate"
     )
     if err or not display_url:
         err_event = {
@@ -1758,7 +1826,9 @@ async def _handle_edit_candidate_ws(
     # free during the 3-8 s API call. See _handle_generate_custom_image_ws
     # for the same reasoning.
     display_url, runpod_url, err = await asyncio.to_thread(
-        _gen_candidate_via_gemini, [effective_prompt, ref_image], "edit"
+        _gen_candidate_via_gemini,
+        [_wrap_prompt_for_3d(effective_prompt), ref_image],
+        "edit",
     )
     if err or not display_url:
         err_event = {
