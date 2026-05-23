@@ -197,14 +197,81 @@ def _get_picker_result(request_id: str) -> dict | None:
 
 
 def _append_picker_history(request_id: str, action: str, prompt: str) -> None:
-    """Record a prompt in the picker's session log. `action` is one of
-    "generate" / "edit"; `prompt` is the user's instruction. Used to
-    build smart-context for follow-up edits."""
+    """Record a prompt in the picker's in-memory session log. `action` is
+    one of "generate" / "edit"; `prompt` is the user's instruction.
+
+    NB: in-memory only. To survive backend restarts / TTL eviction /
+    page reloads, callers should ALSO persist via _persist_picker_history
+    (which writes the same list into metadata_json.image_search_payload
+    .prompt_history on the picker's DB row). Done in the caller because
+    this function lacks chat_id.
+    """
     if not request_id or not prompt:
         return
     _evict_expired_picker_results()
     session = _PICKER_SESSIONS.setdefault(request_id, [])
     session.append({"action": action, "prompt": prompt})
+
+
+async def _persist_picker_history(chat_id: str, request_id: str) -> None:
+    """Mirror the current in-memory session log into the DB so edits
+    after a backend restart, TTL eviction, or browser reload still
+    have the prompt chain available for context-threading.
+
+    Fire-and-forget — DB errors are swallowed (persistence is a UX
+    nicety, not correctness)."""
+    session = _PICKER_SESSIONS.get(request_id) or []
+    if not session:
+        return
+    try:
+        await _upsert_picker_message(
+            chat_id=chat_id,
+            request_id=request_id,
+            payload_patch={"prompt_history": list(session)},
+        )
+    except Exception:
+        # _upsert_picker_message already swallows + logs internally; if it
+        # somehow escapes, swallow here too.
+        pass
+
+
+async def _rehydrate_picker_history(request_id: str) -> None:
+    """If the in-memory session log for `request_id` is empty (e.g. after
+    a backend restart, TTL eviction, or first edit following a browser
+    reload), repopulate it from the persisted DB row's
+    metadata_json.image_search_payload.prompt_history. Best-effort: if
+    nothing is there, the session stays empty and _build_edit_prompt_with_context
+    falls through to the bare edit prompt.
+    """
+    if not request_id:
+        return
+    if _PICKER_SESSIONS.get(request_id):
+        # In-memory copy is fresher; don't overwrite with stale DB state.
+        return
+    try:
+        async with SessionLocal() as db:
+            row = await db.get(MessageModel, request_id)
+            if row is None:
+                return
+            meta = row.metadata_json or {}
+            payload = meta.get("image_search_payload") or {}
+            history = payload.get("prompt_history") or []
+            if not isinstance(history, list) or not history:
+                # Fallback: the candidate's bare prompt field is enough
+                # to anchor at least one turn of context.
+                cand = payload.get("candidate") or {}
+                cand_prompt = cand.get("prompt")
+                if isinstance(cand_prompt, str) and cand_prompt.strip():
+                    history = [{"action": "generate", "prompt": cand_prompt}]
+            if history:
+                _PICKER_SESSIONS[request_id] = [
+                    {"action": str(e.get("action") or ""),
+                     "prompt":  str(e.get("prompt")  or "")}
+                    for e in history
+                    if isinstance(e, dict) and e.get("prompt")
+                ]
+    except Exception:
+        pass
 
 
 def _strip_persistence_bloat(payload: dict | None) -> dict | None:
@@ -1472,6 +1539,7 @@ async def _handle_generate_custom_image_ws(
     if cached_pre is not None:
         cached_url, cached_data_url = cached_pre
         _append_picker_history(request_id, "generate", custom_prompt)
+        await _persist_picker_history(chat_id, request_id)
         ready_event = {
             "type": "image_to_3d.candidate_ready",
             "chat_id": chat_id,
@@ -1533,6 +1601,7 @@ async def _handle_generate_custom_image_ws(
     # Anchor the picker session with the original generate prompt — every
     # subsequent edit will reference it via _build_edit_prompt_with_context.
     _append_picker_history(request_id, "generate", custom_prompt)
+    await _persist_picker_history(chat_id, request_id)
 
     ready_event = {
         "type": "image_to_3d.candidate_ready",
@@ -1613,6 +1682,15 @@ async def _handle_edit_candidate_ws(
         await _safe_send_json(websocket, err_event)
         return
 
+    # Rehydrate the in-memory session log from DB if it's empty —
+    # covers backend restarts, TTL eviction, and the very first edit
+    # after a browser reload (where the picker payload came from DB but
+    # _PICKER_SESSIONS started cold). Without this, the edit prompt
+    # would be sent to Gemini without any "previously the user asked
+    # for X" context, and the model would treat each edit as a fresh
+    # generation, losing the iterative intent.
+    await _rehydrate_picker_history(request_id)
+
     # Build the effective prompt (user's prompt + session context) so
     # the cache key matches what we'd actually send to Gemini — without
     # this, the cache key would be the raw user prompt but the cache
@@ -1642,6 +1720,7 @@ async def _handle_edit_candidate_ws(
     if cached_pre is not None:
         cached_url, cached_data_url = cached_pre
         _append_picker_history(request_id, "edit", edit_prompt)
+        await _persist_picker_history(chat_id, request_id)
         ready_event = {
             "type": "image_to_3d.candidate_ready",
             "chat_id": chat_id,
@@ -1701,6 +1780,7 @@ async def _handle_edit_candidate_ws(
     # edits see what the user actually asked for, not our internal
     # context preamble.
     _append_picker_history(request_id, "edit", edit_prompt)
+    await _persist_picker_history(chat_id, request_id)
 
     ready_event = {
         "type": "image_to_3d.candidate_ready",
