@@ -63,7 +63,12 @@ def _fetch_r2(bucket: str, key: str):
     client = _get_r2_client()
     if client is None:
         return None
-    from botocore.exceptions import ClientError
+    from botocore.exceptions import (
+        ClientError,
+        ConnectTimeoutError,
+        ConnectionError as BotoConnectionError,
+        ReadTimeoutError,
+    )
     target_bucket = settings.r2_bucket_name or bucket
     try:
         resp = client.get_object(Bucket=target_bucket, Key=key)
@@ -77,6 +82,18 @@ def _fetch_r2(bucket: str, key: str):
             return None
         logger.error(f"[R2] get_object {target_bucket}/{key} failed: {code} {e}")
         raise HTTPException(status_code=502, detail=f"R2 fetch failed: {code}")
+    except (ReadTimeoutError, ConnectTimeoutError, BotoConnectionError) as e:
+        # Network-level failure — TLS handshake stall, slow link, R2 region
+        # blip. Surface as 504 so the frontend can show a "couldn't reach
+        # storage, retry" message instead of a generic 500.
+        logger.warning(
+            f"[R2] timeout/connection error for {target_bucket}/{key}: "
+            f"{type(e).__name__}: {e}"
+        )
+        raise HTTPException(
+            status_code=504,
+            detail="Object storage timed out — check network and retry.",
+        )
 
 
 def _diagnose_r2_404(bucket: str, key: str) -> None:

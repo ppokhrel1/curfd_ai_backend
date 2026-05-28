@@ -379,12 +379,34 @@ async def _upsert_picker_message(
 _HUNYUAN_FRIENDLY_PREAMBLE = (
     "Render this for high-fidelity 3D model reconstruction. Critical "
     "requirements (treat as hard constraints, not stylistic suggestions):\n"
-    "- One subject, centered, fully in frame with margin on all sides "
-    "(no parts cropped or touching the edge).\n"
-    "- Plain background — pure white or a neutral soft-grey gradient. "
-    "No patterns, props, text, or scenery.\n"
-    "- Even, diffuse, soft front-lighting from slightly above. No hard "
-    "directional shadows, no rim lighting, no backlight, no harsh contrast.\n"
+    # ── Frame composition — subject must dominate the canvas. Hunyuan
+    #    crops to the segmented subject before bake, so any wasted
+    #    canvas-area is wasted texture resolution. 80% fill keeps the
+    #    "margin on all sides" rule intact while pushing detail.
+    "- Subject fills roughly 80% of the frame, centered, with a thin "
+    "even margin on all sides (no parts cropped or touching the edge). "
+    "Do not include props, scenery, or supporting objects — fill the "
+    "frame with the subject itself.\n"
+    # ── Background — pure white only. The previous "or neutral grey
+    #    gradient" allowance bled into the painted texture (rembg's
+    #    matte estimation isn't perfect on gradients).
+    "- Pure white background (#FFFFFF) only. No gradient, no vignette, "
+    "no environment, no floor, no shadow on the ground plane, no "
+    "patterns, no text. The subject sits in empty white space.\n"
+    # ── Lighting — fully ambient. Hunyuan-Paint's diffuse-albedo
+    #    extractor mistakes shadows for surface colour, so any directional
+    #    or dramatic lighting bakes dark patches into the texture.
+    "- Fully ambient, even illumination from all sides. No directional "
+    "shadows, no rim lighting, no backlight, no studio key/fill setup, "
+    "no harsh contrast. Render as if the subject is lit by a uniform "
+    "softbox dome — every surface visible and equally exposed.\n"
+    # ── Camera — orthographic-ish hero shot. Extreme isometric or
+    #    dramatic perspective creates depth ambiguity in the multi-view
+    #    diffusion bake.
+    "- Camera: orthographic 3/4 hero view, roughly 30° azimuth and 15° "
+    "elevation, lens compressed (telephoto-like, minimal perspective "
+    "distortion). Avoid dramatic isometric, fisheye, low-angle, or "
+    "extreme top-down framings.\n"
     "- Matte / non-reflective surfaces. Never use chrome, polished metal, "
     "mirror, glass, water, transparent fabric, smoke, or specular highlights. "
     "If the subject is naturally shiny, render it as a matte painted prop.\n"

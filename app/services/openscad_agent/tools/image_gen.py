@@ -130,15 +130,19 @@ def _store_cached_image(
 # `gemini-3-pro-image-preview` and renders fine geometric detail
 # (through-holes, internal cavities, sharp silhouettes) much more
 # reliably than 2.5-flash-image — important for downstream 3D
-# reconstruction with Hunyuan. We try Pro first, then fall back to
-# 2.5 family on 404 so a regional naming change doesn't break the tool.
-# Override with GEMINI_IMAGE_MODEL.
+# reconstruction with Hunyuan.
+#
+# Quota note: free-tier quotas are PER-MODEL on Google's side — so when
+# `gemini-3-pro-image-preview` returns 429 we keep trying the rest of
+# the list because each one carries its own bucket. The GA model
+# (`gemini-2.5-flash-image`) generally has the highest free-tier
+# ceiling, so it sits right after Pro. Override with GEMINI_IMAGE_MODEL.
 _DEFAULT_IMAGE_MODEL = "gemini-3-pro-image-preview"
 _PRIMARY_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", _DEFAULT_IMAGE_MODEL)
 _IMAGE_MODEL_FALLBACKS = [
     "gemini-3-pro-image-preview",
-    "gemini-2.5-flash-image",
-    "gemini-2.5-flash-image-preview",
+    "gemini-2.5-flash-image",          # GA — usually has the highest free quota
+    "gemini-2.5-flash-image-preview",  # legacy preview — separate quota bucket
     "gemini-2.0-flash-preview-image-generation",
     "gemini-2.0-flash-exp-image-generation",
 ]
@@ -161,12 +165,28 @@ def _is_model_404(exc: Exception) -> bool:
     return ("404" in msg or "not_found" in msg) and "model" in msg
 
 
+def _is_quota_exhausted(exc: Exception) -> bool:
+    """Detect a 429 / RESOURCE_EXHAUSTED — free-tier quotas are per-model,
+    so the next candidate in the list may still have budget."""
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "resource_exhausted" in msg
+        or "quota" in msg
+        or "rate limit" in msg
+    )
+
+
 def _generate_with_fallback(client, contents) -> tuple[object, str]:
     """Call generate_content trying each candidate model in order.
 
     Returns (response, model_used). Raises the last exception if every
-    candidate fails. Failures other than 404-not-found re-raise immediately,
-    since a quota/safety/network error won't be fixed by switching model."""
+    candidate fails. We fall through on:
+      - 404 NOT_FOUND  (model name is regionally unavailable / renamed)
+      - 429 RESOURCE_EXHAUSTED (per-model free-tier quota is empty —
+        sibling models have separate quota buckets so it's worth a try)
+    Everything else (safety blocks, auth, network) re-raises immediately
+    since switching models can't fix it."""
     last_exc: Exception | None = None
     for model in _candidate_models():
         try:
@@ -177,10 +197,17 @@ def _generate_with_fallback(client, contents) -> tuple[object, str]:
                 )
             return response, model
         except Exception as exc:
-            if not _is_model_404(exc):
-                raise
-            logger.info(f"[image_gen] {model!r} 404, trying next candidate")
-            last_exc = exc
+            if _is_model_404(exc):
+                logger.info(f"[image_gen] {model!r} 404, trying next candidate")
+                last_exc = exc
+                continue
+            if _is_quota_exhausted(exc):
+                logger.warning(
+                    f"[image_gen] {model!r} 429 quota exhausted, trying next candidate"
+                )
+                last_exc = exc
+                continue
+            raise
     raise last_exc or RuntimeError("No image-capable Gemini model is reachable")
 
 
